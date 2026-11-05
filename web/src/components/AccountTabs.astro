@@ -1,0 +1,55 @@
+---
+import type { Account } from '../lib/api';
+import { accountHref, groupByDept } from '../lib/accountTabs';
+/**
+ * 账号切换条（共用组件）。
+ *
+ * 多个页面都要按账号切换（课程 / 考勤 / 刷课 / 运行日志），
+ * 各自实现一遍必然漏 —— 考勤页最初就漏了，读 `?account=` 却没给入口。
+ *
+ * 单账号时整体不渲染，避免占位。
+ *
+ * ⚠️ `AccountTabs.tsx` 是本组件的 React 孪生版（刷课面板要在运行中禁用切换，
+ *    必须是 React 组件才能读 running 状态）。改标记时两个一起改。
+ */
+
+interface Props {
+  accounts: Account[];
+  current?: number;
+  /** 当前路径，用于拼跳转链接 */
+  path: string;
+}
+
+const { accounts, current, path } = Astro.props;
+// 按**班级**分组 —— 6 个账号里 4 个同班，平铺一行认不出谁是谁；
+// 而代课/批量操作基本都是按班发生的。
+const groups = groupByDept(accounts);
+
+/**
+ * 拼账号链接时**保留当前页面的其它查询参数**。
+ *
+ * ⚠️ 原先是死拼 `?account=${a.id}` —— 于是 `/study?account=1&term=X&course=Y`
+ * 上一切换账号，term/course 就被静默丢掉，用户以为"这门课没了"。
+ * `/courses` 专门生成过这种深链，结果被切换器吃掉。
+ *
+ * 与 姊妹项目 的 `AccountTabs.astro` 对齐（它用 `extra` 参数做同样的事）。
+ */
+---
+
+<div class="card mt-16">
+    {groups.map((g) => (
+      <div class="row" style="gap:8px; margin-bottom:6px; align-items:center">
+        <span class="muted small" style="min-width:84px" title={g.dept}>{g.dept}</span>
+        {g.items.map((a) => (
+          <a
+            class={`btn btn-sm ${a.id === current ? 'btn-primary' : ''}`}
+            href={accountHref(path, a.id, Astro.url.searchParams)}
+            aria-current={a.id === current ? 'page' : undefined}
+            title={a.username}
+          >
+            {a.label}
+          </a>
+        ))}
+      </div>
+    ))}
+  </div>

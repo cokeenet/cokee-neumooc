@@ -1,0 +1,11 @@
+/**
+ * 样式入口。
+ *
+ * 通用部分来自共用包，项目特有部分在本目录的 `neumooc-extras.css`。
+ * 顺序不能反 —— 后者要能覆盖前者。
+ *
+ * ⚠️ 不要删包里的 `@source` 指令：Tailwind v4 默认只扫项目自身目录，
+ * 不扫 node_modules，包里组件用到的工具类会凭空消失（HTML 里有类名但没效果）。
+ */
+@import 'korikura-webui/styles.css';
+@import './neumooc-extras.css';

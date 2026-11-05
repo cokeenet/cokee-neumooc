@@ -1,0 +1,191 @@
+---
+/**
+ * 课程：一屏看全部（见 docs/UI-REDESIGN.md「课程 /courses」）。
+ *
+ * 重做要点：
+ *   · 一卡一课 → 一张紧凑表格。原本 11 门课是 11 张大卡片，一屏只能看 3 门
+ *   · `res_total === 0` 表示这门课没扫到任何资源，**不是**学完了。
+ *     旧版对 11 门课里的 10 门都标「✓ 已完成」，是彻头彻尾的假话；
+ *     现在这种课显示「无资源」，进度和操作都不再谎报完成
+ *   · 进度数字只认 `res_done`/`res_total`——后端用同一张 resources 表现算，
+ *     平台返回的 `progress` 字符串不参与展示
+ *   · 操作列直接给刷课入口：`/study` 只读 `?account=`，
+ *     多塞 `&course=` 会被静默忽略，所以不塞
+ *   · **保留**「待完成资源清单」（可展开）——旧版有这个功能，
+ *     压成表格时差点被顺手删掉。功能只增不减。
+ *   · 纯 SSR，零客户端 JS
+ */
+import Base from '../layouts/Base.astro';
+import AccountTabs from '../components/AccountTabs.astro';
+import StatCard from 'korikura-webui/components/ui/StatCard.astro';
+import EmptyState from 'korikura-webui/components/ui/EmptyState.astro';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { serverFetchResult } from '../lib/backend';
+// 类型从**唯一来源**引 —— 这个项目里一度有 10 份不同的 Account 定义
+import type { Account, Course, Resource } from '../lib/api';
+import { RES_TYPE_TEXT } from '../lib/labels';
+
+
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const accounts = accRes.ok ? accRes.data : [];
+const loadError = accRes.ok ? '' : accRes.error;
+const accountId = Number(Astro.url.searchParams.get('account')) || accounts[0]?.id;
+// ⚠️ 必须用 `serverFetchResult` 而不是 `serverFetch(...) ?? []` ——
+// 后者把「取不到数据」抹成「没有数据」，于是后端挂掉时页面显示
+// 「还没有课程数据，去刷课页扫描一次」，把用户引向一个没用的动作。
+// 这两种状态的**下一步动作完全不同**，不能混。
+const coursesRes = accountId
+  ? await serverFetchResult<Course[]>(`/api/accounts/${accountId}/courses`)
+  : null;
+const courses = coursesRes?.ok ? coursesRes.data : [];
+const coursesError = coursesRes && !coursesRes.ok ? coursesRes.error : '';
+/**
+ * 未完成的资源，按课程分组。
+ *
+ * 这次请求**不是**冗余：进度数字确实能从 `res_done/res_total` 算出来，
+ * 但「具体还差哪几个视频」只有这里拿得到。旧版有这份清单，重做时不能顺手丢掉。
+ */
+const pendingRes = accountId
+  ? await serverFetchResult<Resource[]>(`/api/accounts/${accountId}/resources?only_todo=true`)
+  : null;
+const pending = pendingRes?.ok ? pendingRes.data : [];
+const pendingByCourse = new Map<number, Resource[]>();
+for (const r of pending) {
+  const list = pendingByCourse.get(r.course_pk) ?? [];
+  list.push(r);
+  pendingByCourse.set(r.course_pk, list);
+}
+
+/** 有资源、且资源全部学完。0 资源的课不算完成——没扫到东西 ≠ 学完了 */
+const isDone = (c: Course) => c.res_total > 0 && c.res_done >= c.res_total;
+/** 进度百分比；调用前必须先排除 res_total === 0 */
+const pct = (c: Course) => (c.res_total ? Math.round((c.res_done / c.res_total) * 100) : 0);
+
+const doneCount = courses.filter(isDone).length;
+/** 还有未完成资源的课程：0 资源的课没有可刷的东西，不计入 */
+const todoCount = courses.filter((c) => c.res_total > c.res_done).length;
+const noResCount = courses.filter((c) => c.res_total === 0).length;
+const resTotal = courses.reduce((s, c) => s + c.res_total, 0);
+---
+
+<Base title="课程" description="课程与学习进度">
+  <section class="page-head">
+    <h1>课程</h1>
+    <p class="muted">已缓存的课程与学习进度，数据来自上次扫描。</p>
+  </section>
+
+  <AccountTabs accounts={accounts} current={accountId} path="/courses" />
+
+  {loadError ? (
+    <div class="card mt-16">
+      <ErrorState text={loadError} />
+    </div>
+  ) : !accountId ? (
+    <div class="card mt-16">
+      <EmptyState
+        title="还没有接入账号"
+        desc="添加一个东软智慧教育账号，平台会自动拉取课程与学习进度。"
+        href="/accounts"
+        action="前往「账号」添加"
+      />
+    </div>
+  ) : coursesError ? (
+    <div class="card">
+      <ErrorState text={`取不到课程数据：${coursesError}`} />
+      <p class="muted small" style="text-align:center">
+        这是<strong>取不到数据</strong>，不是「没有课程」。
+      </p>
+    </div>
+  ) : courses.length === 0 ? (
+    <div class="card mt-16">
+      <EmptyState
+        title="还没有课程数据"
+        desc="到「刷课」页面点一次「扫描课程」，课程与资源就会出现在这里。"
+        href={`/study?account=${accountId}`}
+        action="前往「刷课」扫描"
+      />
+    </div>
+  ) : (
+    <>
+      <div class="stat-grid mt-16">
+        <StatCard value={courses.length} label="课程总数" hint={`共 ${resTotal} 项资源`} />
+        <StatCard
+          value={doneCount}
+          label="已完成课程"
+          tone={doneCount === courses.length ? 'ok' : 'muted'}
+          hint="资源全部学完的课"
+        />
+        <StatCard
+          value={todoCount}
+          label="有待完成资源的课程"
+          tone={todoCount > 0 ? 'warn' : 'muted'}
+          hint={todoCount > 0 ? '可逐门进入刷课' : '当前没有待完成的资源'}
+        />
+      </div>
+
+      <div class="card mt-24">
+        <h2 class="card-title">
+          课程
+          {noResCount > 0 && <span class="card-meta">{noResCount} 门未扫到资源</span>}
+        </h2>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>课程</th><th>学期</th><th>进度</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+              {courses.map((c) => (
+                <tr>
+                  <td>{c.course_name}</td>
+                  <td>{c.term_name || '—'}</td>
+                  <td>
+                    {c.res_total === 0 ? (
+                      <span class="muted">无资源</span>
+                    ) : (
+                      <>
+                        <div class="pbar">
+                          <div class="pbar-track">
+                            <div
+                              class={`pbar-fill${isDone(c) ? ' is-done' : ''}`}
+                              style={`width:${pct(c)}%`}
+                            />
+                          </div>
+                          <span class="pbar-text">{`${c.res_done}/${c.res_total} (${pct(c)}%)`}</span>
+                        </div>
+                        {(pendingByCourse.get(c.id)?.length ?? 0) > 0 && (
+                          <details class="mt-16">
+                            <summary class="sub" style="cursor:pointer">
+                              待完成 {pendingByCourse.get(c.id)!.length} 项，点击展开
+                            </summary>
+                            <ul class="res-list">
+                              {pendingByCourse.get(c.id)!.map((r) => (
+                                <li>
+                                  <span class="badge badge-muted">{RES_TYPE_TEXT[r.res_type] ?? '其他'}</span>
+                                  <span>{r.name}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </>
+                    )}
+                  </td>
+                  <td>
+                    {c.res_total === 0 ? (
+                      <span class="muted">—</span>
+                    ) : c.res_total > c.res_done ? (
+                      <a class="btn btn-sm"
+                        href={`/study?account=${accountId}&term=${c.term_id}&course=${c.id}`}>刷这门课</a>
+                    ) : (
+                      <span class="muted">已完成</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )}
+</Base>

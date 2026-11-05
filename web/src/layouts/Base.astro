@@ -1,0 +1,72 @@
+---
+/**
+ * 基础布局 —— 用共用框架 `korikura-webui` 的 Base。
+ *
+ * 原先本项目与 同类平台 各维护一份 Navbar/Footer/主题/样式，实测两边的
+ * 依赖版本、主题变量、CSS 选择器 96% 相同 —— 所以抽成包，改一处两边生效。
+ *
+ * 包里的 Base 已含：`<head>`、**主题防闪烁内联脚本**、视图过渡、导航、页脚。
+ * 这里只负责：导航项、署名、以及**本项目特有的客户端行为**（登出）。
+ */
+import Base from 'korikura-webui/components/Base.astro';
+// 导航的**唯一来源** —— 不再写在这个文件的局部变量里
+import { navLinks, SITE_NAME } from '../lib/nav';
+
+// ⚠️ **必须在这里引样式**。包的 `Base.astro` 自己**不引任何 CSS** ——
+// 它期望使用方引（README 的用法就是这样）。换布局时漏掉这一行，
+// 后果是**整个站点的样式全丢**，而页面结构照常渲染、
+// 验收脚本只查 DOM 结构的话**完全发现不了**。
+// 本项目实测栽过一次：切完包之后 CSS 只剩 151 字节（Astro 的路由播报器）。
+import '../styles/style.css';
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const { title = '控制台' } = Astro.props;
+
+// 用户由中间件（src/middleware.ts）鉴权后写入 locals。
+// 守卫必须在中间件里做 —— layout frontmatter 里 Astro.redirect() 会因
+// 流式渲染已开始而报 ResponseSentError，表现为页面 500 且守卫静默失效。
+const user = Astro.locals.user ?? null;
+
+---
+
+<Base
+  title={title}
+  siteName={SITE_NAME}
+  links={navLinks(!!user?.is_root)}
+  loggedIn={!!user}
+  credits={[
+    { prefix: '主题来源', name: 'korikura-theme', href: 'https://github.com/foxmoe/korikura-theme' },
+    { prefix: '协议研究参考', name: 'neumooc-script', href: 'https://github.com/LuBanQAQ/neumooc-script' },
+  ]}
+>
+  <slot />
+</Base>
+
+<script>
+  // 导航/主题/抽屉的行为在包里，**必须显式注册** —— 包的组件只给外观。
+  import {
+    onPageReady,
+    initNavScroll,
+    initDrawer,
+    initTheme,
+    initLogout,
+    initMotionBg,
+  } from 'korikura-webui/lib/ui';
+
+  onPageReady(() => {
+    initNavScroll();
+    initDrawer();
+    initTheme();
+  });
+
+  // 登出：包只渲染按钮外观。防连点 / `cache:'no-store'` / 失败要说得出口
+  // 这三个细节原先写在下面，现在收进包的 `initLogout`（两个接入项目共用）。
+  initLogout({ endpoint: '/api/auth/logout', redirect: '/login' });
+
+  // 动态几何图案背景（○ △ X □ 缓慢斜向平移，无缝循环）
+  initMotionBg();
+</script>

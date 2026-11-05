@@ -1,0 +1,43 @@
+---
+/** 作业：待办清单 + AI 辅助作答。 */
+import Base from '../layouts/Base.astro';
+import AccountTabs from '../components/AccountTabs.astro';
+import TasksPanel from '../components/TasksPanel.tsx';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { serverFetchResult } from '../lib/backend';
+import type { Account } from '../lib/api';
+
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const accounts = accRes.ok ? accRes.data : [];
+const loadError = accRes.ok ? '' : accRes.error;
+const accountId = Number(Astro.url.searchParams.get('account')) || accounts[0]?.id;
+---
+
+<Base title="作业" description="作业清单与 AI 辅助作答">
+  <section class="page-head">
+    <h1>作业</h1>
+    <p class="muted">
+      该账号当前学期的作业与测验。<strong>左侧选一份，右侧看题目与得分</strong>
+      （未交的显示「未交」）。作答仍需在平台页面完成 —— 这里只读，不代交。
+    </p>
+  </section>
+
+  {loadError ? (
+    <div class="card">
+      <ErrorState text={loadError} />
+    </div>
+  ) : accountId ? (
+    <>
+      <AccountTabs accounts={accounts} current={accountId} path="/tasks" />
+      <TasksPanel client:load accounts={accounts} accountId={accountId} />
+    </>
+  ) : (
+    <div class="card">
+      <div class="empty-state">
+        <p class="empty-title">还没有接入账号</p>
+        <p class="empty-desc">添加账号后，就能在这里看到作业清单。</p>
+        <a class="btn btn-primary btn-sm mt-16" href="/accounts">前往「账号」添加</a>
+      </div>
+    </div>
+  )}
+</Base>

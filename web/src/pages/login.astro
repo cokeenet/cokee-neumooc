@@ -1,0 +1,15 @@
+---
+/**
+ * 登录页：公开页面（public），不走守卫。
+ *
+ * 外观与提交流程都在包的 `LoginCard` 里 —— 五个平台共用一份，
+ * 这里只传本站的差异（接口地址、跳转参数、文案）。
+ * 以后调整登录页只改包，不要在站点里再抄一份。
+ */
+import Base from '../layouts/Base.astro';
+import LoginCard from 'korikura-webui/components/LoginCard.astro';
+---
+
+<Base title="登录" description="登录学习自动化平台">
+  <LoginCard title="东软学习自动化" subtitle="请登录后使用" />
+</Base>

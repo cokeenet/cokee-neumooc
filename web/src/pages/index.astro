@@ -1,0 +1,465 @@
+---
+/**
+ * 概览：今天该做什么。
+ *
+ * 重做要点（见 docs/UI-REDESIGN.md）：
+ *   · 首屏回答「我现在该做什么」，不再摆 `活跃 worker`、`幂等说明` 这类内部概念
+ *   · 令牌过期是常态（会自动重登），不再当成异常显示
+ *   · 刷课**没有「每天一次」的概念**（随时可再刷，见 docs/PLATFORM-AUDIT.md §七），
+ *     所以这里不看「今天刷过没有」，而是看「还有多少待完成」+「最近一次刷课」
+ *   · 纯 SSR，零客户端 JS
+ */
+import Base from '../layouts/Base.astro';
+import { serverFetchResult } from '../lib/backend';
+import StatusBadge from 'korikura-webui/components/ui/StatusBadge.astro';
+import StatCard from 'korikura-webui/components/ui/StatCard.astro';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { accountState, bizDateNow, execState, fmtTs, jobLabel } from '../lib/labels';
+import type { Account } from '../lib/api';
+
+interface Exec { account_id: number; job_key: string; biz_date: string; state: string; started_at: number; detail: string }
+interface Course { id: number; term_id: string; course_name: string }
+interface AttSummary {
+  total: number; signed: number; missed: number;
+  pending: number; upcoming: number; rate: number;
+}
+interface AttItem { title: string; course_name: string; open_time: number; finish_time: number }
+interface AttResp { summary: AttSummary; pending_items: AttItem[] }
+
+/** 业务日：与后端 db.biz_date_now() 对齐（北京时间，非容器本地时区） */
+const nowMs = Date.now();
+const bizDate = bizDateNow();
+
+// 取数失败必须与「没有数据」区分开：否则后端一挂，这一页会对
+// 已经有账号的用户显示「还没有接入账号」并让他去添加账号 —— 在说假话。
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const execRes = await serverFetchResult<Exec[]>('/api/executions?limit=100');
+const accounts = accRes.ok ? accRes.data : [];
+const execs = execRes.ok ? execRes.data : [];
+const loadError = accRes.ok ? (execRes.ok ? '' : execRes.error) : accRes.error;
+
+// 考勤摘要按账号并行取。
+//
+// **容忍失败是故意的**（不让一个账号取不到就把整页打成 500），
+// 但**必须把「取不到」和「没有」分开** —— 原先 `serverFetch` 失败返回 null，
+// 页面把两种情况都渲染成「未同步」，用户以为是自己没点同步。
+const attPairs = await Promise.all(
+  accounts.map(async (a) => {
+    const r = await serverFetchResult<AttResp>(`/api/accounts/${a.id}/attendance`);
+    return [a.id, r] as const;
+  }),
+);
+const attBy = new Map(attPairs);
+/** 取不到考勤的账号（用于在界面上说明「数据不完整」）。 */
+const attFailed = attPairs.filter(([, r]) => !r.ok).map(([id]) => id);
+/** 取某账号的考勤数据；取不到返回 null（与「没有场次」区分开）。 */
+const attOf = (id: number) => {
+  const r = attBy.get(id);
+  return r?.ok ? r.data : null;
+};
+const sumOf = (id: number) => attOf(id)?.summary;
+
+/**
+ * 每个账号待完成的资源数，**按学期拆开**。
+ *
+ * 为什么必须拆：待完成里绝大多数是**已结束学期**的遗留（实测账号1 的 148 个
+ * 全部来自上学期，当前学期是 0）。把它们和当前学期混成一个数字，首页就会显示
+ * 「698 个资源待完成」——数字是真的，但指向的是一堆没人会再看的东西，
+ * 和之前「谎称没有数据」属于同一类误导。
+ *
+ * 当前学期 = 该账号课程里 term_id 最大的那个（term_id 是递增数字串，字符串比较即可）。
+ */
+const coursePairs = await Promise.all(
+  accounts.map(async (a) => {
+    const r = await serverFetchResult<Course[]>(`/api/accounts/${a.id}/courses`);
+    return [a.id, r.ok ? r.data : []] as const;
+  }),
+);
+const coursesBy = new Map(coursePairs);
+const latestTermBy = new Map<number, string>();
+for (const [id, cs] of coursesBy) {
+  const ids = cs.map((c) => c.term_id).filter(Boolean).sort();
+  latestTermBy.set(id, ids[ids.length - 1] ?? '');
+}
+
+const resPairs = await Promise.all(
+  accounts.map(async (a) => {
+    const r = await serverFetchResult<{ course_pk: number }[]>(
+      `/api/accounts/${a.id}/resources?only_todo=true`,
+    );
+    if (!r.ok) return [a.id, null] as const;
+    const termOf = new Map((coursesBy.get(a.id) ?? []).map((c) => [c.id, c.term_id]));
+    const latest = latestTermBy.get(a.id) ?? '';
+    let cur = 0;
+    let old = 0;
+    for (const row of r.data) {
+      if (!latest || termOf.get(row.course_pk) === latest) cur += 1;
+      else old += 1;
+    }
+    return [a.id, { cur, old }] as const;
+  }),
+);
+const todoBy = new Map(resPairs);
+const totTodo = accounts.reduce((s, a) => s + (todoBy.get(a.id)?.cur ?? 0), 0);
+const totLeftover = accounts.reduce((s, a) => s + (todoBy.get(a.id)?.old ?? 0), 0);
+
+/** 每个账号最近一次刷课成功的时间 */
+const lastStudy = new Map<number, number>();
+for (const e of execs) {
+  if (e.job_key !== 'study' || e.state !== 'done') continue;
+  if (e.started_at > (lastStudy.get(e.account_id) ?? 0)) {
+    lastStudy.set(e.account_id, e.started_at);
+  }
+}
+
+const studyRunning = new Set(
+  execs.filter((e) => e.job_key === 'study' && e.biz_date === bizDate && e.state === 'running')
+       .map((e) => e.account_id),
+);
+
+/**
+ * 每个账号最近一次「每日检查」的结果。
+ *
+ * 这是调度现在的全部产出：它只负责**发现**有没有新资源要刷、有没有新作业要写，
+ * 要不要刷由人决定。所以首页必须把检查结果摆出来 —— 否则调度跑了也没人知道。
+ * 检查结果存在 `executions.detail`（JSON 字符串）里。
+ */
+interface CheckDetail {
+  new_resources?: number; todo_resources?: number;
+  pending_tasks?: number; task_error?: string; term_name?: string;
+}
+const lastCheck = new Map<number, CheckDetail>();
+for (const e of execs) {
+  if (e.job_key !== 'check' || e.state !== 'done' || lastCheck.has(e.account_id)) continue;
+  try {
+    lastCheck.set(e.account_id, JSON.parse(e.detail || '{}') as CheckDetail);
+  } catch { /* detail 不是 JSON 就忽略，不影响页面 */ }
+}
+/** 有新增资源或有待写作业的账号 */
+const checkAlerts = accounts
+  .map((a) => ({ account: a, d: lastCheck.get(a.id) }))
+  .filter((x) => x.d && ((x.d.new_resources ?? 0) > 0 || (x.d.pending_tasks ?? 0) > 0));
+
+/**
+ * 检查的另外两种状态也必须说出来。
+ *
+ * 原先只有 `checkAlerts`（有新东西才显示），于是三种情况在界面上**完全同形**：
+ *   · 查过了，什么都没发现
+ *   · 一次都没查过
+ *   · 查了但失败了（比如作业接口 403）
+ * 用户无法区分，也就无法判断「该不该自己去看一眼」。
+ */
+const neverChecked = accounts.filter((a) => !lastCheck.has(a.id));
+const checkFailed = accounts
+  .map((a) => ({ account: a, d: lastCheck.get(a.id) }))
+  .filter((x) => x.d?.task_error);
+/** 最近一次检查的时间（用于「上次检查 09:00 · 无新增」） */
+const lastCheckAt = new Map<number, number>();
+for (const e of execs) {
+  if (e.job_key !== 'check' || e.state !== 'done') continue;
+  if (e.started_at > (lastCheckAt.get(e.account_id) ?? 0)) {
+    lastCheckAt.set(e.account_id, e.started_at);
+  }
+}
+const checkedQuiet = accounts.filter(
+  (a) => lastCheck.has(a.id) && !checkAlerts.some((x) => x.account.id === a.id)
+        && !checkFailed.some((x) => x.account.id === a.id),
+);
+
+/** 当前正在进行、且尚未签到的考勤 —— 这是唯一时间敏感的东西 */
+const openNow = accounts.flatMap((a) =>
+  (attOf(a.id)?.pending_items ?? []).map((it) => ({ ...it, account: a })),
+);
+
+const needLogin = accounts.filter((a) => a.state === 'need_login');
+const totSigned = accounts.reduce((s, a) => s + (sumOf(a.id)?.signed ?? 0), 0);
+const totAtt = accounts.reduce((s, a) => s + (sumOf(a.id)?.total ?? 0), 0);
+const totMissed = accounts.reduce((s, a) => s + (sumOf(a.id)?.missed ?? 0), 0);
+const rateText = totAtt ? `${((totSigned / totAtt) * 100).toFixed(1)}%` : '—';
+
+function remaining(finish: number): string {
+  if (!finish) return '未设结束时间';
+  const ms = finish - nowMs;
+  if (ms <= 0) return '已结束';
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `剩余 ${m}:${String(s).padStart(2, '0')}`;
+}
+
+// 共享格式化（强制 Asia/Shanghai），别再各页各写一份 —— 运行日志页
+// 就是因为漏了 timeZone 而比这里早 8 小时。
+const fmt = fmtTs;
+---
+
+<Base title="概览" description="东软智慧教育学习自动化平台">
+  <section class="page-head">
+    <h1>概览</h1>
+    <p class="muted">
+      今天 {bizDate}（北京时间） ·
+      {accounts.length} 个账号 · 本学期 {totTodo} 个资源待完成
+    </p>
+  </section>
+
+  {loadError ? (
+    <div class="card">
+      <ErrorState text={loadError} />
+    </div>
+  ) : accounts.length === 0 ? (
+    <div class="card">
+      <div class="empty-state">
+        <p class="empty-title">还没有接入账号</p>
+        <p class="empty-desc">添加一个东软智慧教育账号，平台会自动拉取课程与考勤，并每天检查有没有新资源要刷。</p>
+        <a class="btn btn-primary btn-sm mt-16" href="/accounts">前往「账号」添加</a>
+      </div>
+    </div>
+  ) : (
+    <>
+      {/* ── 今日概况 ── */}
+      <div class="stat-grid mt-24">
+        <StatCard
+          value={accounts.length}
+          label="已接入账号"
+          hint={`${accounts.length - needLogin.length} 个状态正常`}
+        />
+        <StatCard
+          value={totTodo}
+          label="本学期待完成"
+          tone={totTodo > 0 ? 'warn' : 'ok'}
+          hint={
+            totTodo > 0
+              ? '在「刷课」页手动触发即可'
+              : totLeftover > 0
+                ? `本学期已刷完；往期还有 ${totLeftover} 个遗留`
+                : '所有资源都已完成'
+          }
+        />
+        <StatCard
+          value={rateText}
+          label="考勤完成率"
+          hint={`累计 ${totSigned}/${totAtt} 场已签到`}
+        />
+        <StatCard
+          value={openNow.length}
+          label="待签到"
+          tone={openNow.length > 0 ? 'warn' : 'muted'}
+          hint={openNow.length > 0 ? '有考勤正在进行，尽快提交' : '当前没有进行中的考勤'}
+        />
+      </div>
+
+      {/* ── 需要注意：只在真有事时才占据首屏 ── */}
+      <div class="card">
+        <h2 class="card-title">
+          需要注意
+          <span class="card-meta">
+            {checkAlerts.length + checkFailed.length + neverChecked.length + openNow.length + needLogin.length + (totMissed > 0 ? 1 : 0)} 项
+          </span>
+        </h2>
+
+        {openNow.length === 0 && needLogin.length === 0 && totMissed === 0
+         && checkAlerts.length === 0 && checkFailed.length === 0 && neverChecked.length === 0 ? (
+          <div class="todo-list">
+            <div class="todo-item tone-info">
+              <div class="todo-body">
+                <div class="todo-title">暂无需要注意的事项</div>
+                <div class="todo-sub">
+                  没有进行中的签到，账号都能正常登录，每日检查也没有发现新东西。
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+          <div class="todo-list">
+            {/* 每日检查的产出：有新资源 / 有新作业 —— 调度只负责发现，刷由人决定。
+                用**紧凑表格**（与 同类平台 的考核进度同构）而不是逐账号一条
+                todo-item —— 6 个账号各占一行带按钮，628px 全是重复句式。 */}
+            {checkAlerts.length > 0 && (
+              <table class="table">
+                <thead>
+                  <tr><th>账号</th><th>新资源</th><th>作业</th><th>待完成</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {checkAlerts.map(({ account, d }) => (
+                    <tr>
+                      <td><a href={`/study?account=${account.id}`} style="color:var(--primary)">{account.label}</a></td>
+                      <td>{(d!.new_resources ?? 0) > 0 ? <b style="color:var(--warn)">{d!.new_resources}</b> : <span class="muted">—</span>}</td>
+                      <td>{(d!.pending_tasks ?? 0) > 0 ? <b style="color:var(--warn)">{d!.pending_tasks}</b> : <span class="muted">—</span>}</td>
+                      <td class="muted">{d!.todo_resources ?? 0}</td>
+                      <td><a class="btn btn-sm" href={`/study?account=${account.id}`}>去刷课</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {neverChecked.length > 0 && (
+              <div class="todo-item tone-info">
+                <div class="todo-body">
+                  <div class="todo-title">{neverChecked.length} 个账号还没检查过</div>
+                  <div class="todo-sub">
+                    {neverChecked.map((a) => a.label).join('、')}
+                    · 到「调度」页开启每日检查，或在那里点「立即检查」
+                  </div>
+                </div>
+                <a class="btn btn-sm" href="/schedule">去设置</a>
+              </div>
+            )}
+
+            {checkFailed.map(({ account, d }) => (
+              <div class="todo-item tone-fail">
+                <div class="todo-body">
+                  <div class="todo-title">{account.label} 的作业情况查不到</div>
+                  <div class="todo-sub">{d!.task_error}</div>
+                </div>
+                <a class="btn btn-sm" href={`/logs?account=${account.id}`}>看日志</a>
+              </div>
+            ))}
+
+            {openNow.map((it) => (
+              <div class="todo-item">
+                <div class="todo-body">
+                  <div class="todo-title">正在进行签到：{it.title || it.course_name || '未命名考勤'}</div>
+                  <div class="todo-sub">
+                    {it.account.label} · {remaining(it.finish_time)}
+                    {it.course_name ? ` · ${it.course_name}` : ''}
+                  </div>
+                </div>
+                <a class="btn btn-primary btn-sm" href={`/attendance?account=${it.account.id}`}>去签到</a>
+              </div>
+            ))}
+
+            {needLogin.length > 0 && (
+              <div class="todo-item tone-fail">
+                <div class="todo-body">
+                  <div class="todo-title">{needLogin.length} 个账号需要重新登录</div>
+                  <div class="todo-sub">{needLogin.map((a) => a.label).join('、')} · 密码可能已失效</div>
+                </div>
+                <a class="btn btn-sm" href="/accounts">去处理</a>
+              </div>
+            )}
+
+            {totMissed > 0 && (
+              <div class="todo-item">
+                <div class="todo-body">
+                  <div class="todo-title">有 {totMissed} 次考勤未签到</div>
+                  <div class="todo-sub">可在考勤页对未结束的场次补签。</div>
+                </div>
+                <a class="btn btn-sm" href="/attendance">查看</a>
+              </div>
+            )}
+          </div>
+          {checkedQuiet.length > 0 && (
+            <p class="muted small" style="margin:10px 0 0">
+              另有 {checkedQuiet.length} 个账号（{checkedQuiet.map((a) => a.label).join('、')}）
+              最近一次检查{checkedQuiet[0] && lastCheckAt.has(checkedQuiet[0].id)
+                ? `（${fmt(lastCheckAt.get(checkedQuiet[0].id)!)}）`
+                : ''}没有发现新东西。
+            </p>
+          )}
+          </>
+        )}
+      </div>
+
+      {/* ── 账号状态 ── */}
+      <div class="card mt-24">
+        <h2 class="card-title">账号</h2>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>名称</th><th>学号</th><th>状态</th>
+                <th>考勤</th><th>刷课</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.map((a) => {
+                const s = sumOf(a.id);
+                const ast = accountState(a.state);
+                return (
+                  <tr>
+                    <td>{a.label}</td>
+                    <td class="mono">{a.username}</td>
+                    <td>
+                      <StatusBadge tone={ast.variant} text={ast.text} />
+                    </td>
+                    <td>
+                      {s && s.total > 0 ? (
+                        <>
+                          {s.signed}/{s.total}
+                          <span class="sub"> · {s.rate}%</span>
+                        </>
+                      ) : (
+                        <span class="muted">
+                          {attFailed.includes(a.id) ? '取不到考勤' : '未同步'}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {studyRunning.has(a.id) ? (
+                        <StatusBadge tone="run" text="正在刷" />
+                      ) : todoBy.get(a.id) === null ? (
+                        <span class="muted">取不到</span>
+                      ) : (todoBy.get(a.id)?.cur ?? 0) === 0 ? (
+                        <StatusBadge tone="ok" text="本学期已刷完" />
+                      ) : (
+                        <StatusBadge tone="warn" text={`本学期待完成 ${todoBy.get(a.id)?.cur}`} />
+                      )}
+                      <span class="sub">
+                        {lastStudy.has(a.id) ? `最近 ${fmt(lastStudy.get(a.id)!)}` : '还没刷过'}
+                        {(todoBy.get(a.id)?.old ?? 0) > 0
+                          ? ` · 往期遗留 ${todoBy.get(a.id)?.old}`
+                          : ''}
+                      </span>
+                    </td>
+                    <td>
+                      <div class="row" style="gap:6px">
+                        <a class="btn btn-sm" href={`/study?account=${a.id}`}>刷课</a>
+                        <a class="btn btn-sm" href={`/attendance?account=${a.id}`}>考勤</a>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ── 最近执行：时间倒序，只保留最近 8 条 ── */}
+      <div class="card mt-24">
+        <h2 class="card-title">
+          最近执行
+          <a class="card-meta" href="/logs">全部日志 →</a>
+        </h2>
+        {execs.length === 0 ? (
+          <div class="empty-state">
+            <p class="empty-title">还没有执行记录</p>
+            <p class="empty-desc">手动刷课和定时任务执行后会记录在这里。</p>
+          </div>
+        ) : (
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr><th>时间</th><th>账号</th><th>任务</th><th>状态</th></tr>
+              </thead>
+              <tbody>
+                {execs.slice(0, 8).map((e) => {
+                  const st = execState(e.state);
+                  const acc = accounts.find((a) => a.id === e.account_id);
+                  return (
+                    <tr>
+                      <td>{fmt(e.started_at)}</td>
+                      <td>{acc ? acc.label : `#${e.account_id}`}</td>
+                      <td>{jobLabel(e.job_key)}</td>
+                      <td><StatusBadge tone={st.variant} text={st.text} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  )}
+</Base>

@@ -1,0 +1,49 @@
+[package]
+name = "neumooc-server"
+version = "0.1.0"
+edition = "2021"
+description = "neumooc-platform 服务层（从 Python 版移植）"
+
+[dependencies]
+neumooc-core = { path = "../core" }
+
+# 通知投递（QQ 群）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+
+# 存储：bundled 自带 SQLite，不依赖系统库
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Web 层
+axum = { version = "0.7", features = ["macros"] }
+async-trait = "0.1"
+# SSE：把「轮询数据库」写成一个流
+async-stream = "0.3"
+futures-core = "0.3"
+tokio-stream = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# 平台自身鉴权：Argon2 存密码、SHA-256 存会话令牌哈希
+argon2 = "0.5"
+sha2 = "0.10"
+rand = "0.8"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# 凭据加密：自己实现 Fernet（AES-128-CBC + HMAC-SHA256），
+# 与 Python 版的 cryptography.Fernet 兼容。
+# 不用 fernet crate —— 它会拉 openssl-sys，本机编译不过，
+# 而算法本身只要下面这几个纯 Rust 库。
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+hmac = "0.12"
+base64 = "0.22"
+subtle = "2"
+
+[dev-dependencies]
+tempfile = "3"

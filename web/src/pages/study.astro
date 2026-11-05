@@ -1,0 +1,48 @@
+---
+/** 刷课：选目标 → 执行 → SSE 实时日志。 */
+import Base from '../layouts/Base.astro';
+import StudyPanel from '../components/StudyPanel.tsx';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { serverFetchResult } from '../lib/backend';
+// ⚠️ 不要再在页面里声明一份 Account —— 这个项目里一度有 **三份** 不同的定义
+// （lib/api.ts、study.astro、courses.astro…），字段各不相同，
+// 于是「页面拿到的类型」和「组件期望的类型」对不上，报的还是看不懂的错。
+// 统一从 lib/api.ts 引。
+import type { Account } from '../lib/api';
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const accounts = accRes.ok ? accRes.data : [];
+const loadError = accRes.ok ? '' : accRes.error;
+const accountId = Number(Astro.url.searchParams.get('account')) || accounts[0]?.id;
+// 深链参数：课程页的「刷这门课」会带上，让用户落在正确的学期与课程上
+const initialTermId = Astro.url.searchParams.get('term') ?? '';
+const initialCoursePk = Number(Astro.url.searchParams.get('course')) || undefined;
+---
+
+<Base title="刷课" description="批量完成学习资源">
+  <section class="page-head">
+    <h1>刷课</h1>
+    <p class="muted">扫描课程 → 选择目标 → 一键完成，实时看进度。</p>
+  </section>
+
+  {loadError ? (
+    <div class="card">
+      <ErrorState text={loadError} />
+    </div>
+  ) : accountId ? (
+    <StudyPanel
+      client:load
+      accounts={accounts}
+      accountId={accountId}
+      initialTermId={initialTermId}
+      initialCoursePk={initialCoursePk}
+    />
+  ) : (
+    <div class="card">
+      <div class="empty-state">
+        <p class="empty-title">还没有接入账号</p>
+        <p class="empty-desc">先添加一个账号，再回来刷课。</p>
+        <a class="btn btn-primary btn-sm mt-16" href="/accounts">前往「账号」添加</a>
+      </div>
+    </div>
+  )}
+</Base>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 128 128">
+  <!-- 学士帽 + 对勾：表示「学习任务完成」 -->
+  <path d="M64 22 12 47l52 25 52-25-52-25Z" />
+  <path d="M30 60v22c0 10 15 18 34 18s34-8 34-18V60l-34 16-34-16Z" opacity=".55" />
+  <path d="M112 51v30" stroke-width="7" stroke-linecap="round" />
+  <style>
+    path { fill: #000; stroke: #000; }
+    @media (prefers-color-scheme: dark) {
+      path { fill: #FFF; stroke: #FFF; }
+    }
+  </style>
+</svg>

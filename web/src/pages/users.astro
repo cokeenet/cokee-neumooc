@@ -1,0 +1,16 @@
+---
+/** 用户管理（仅 root）。普通用户无权访问。 */
+import Base from '../layouts/Base.astro';
+import UsersPanel from '../components/UsersPanel.tsx';
+
+const me = Astro.locals.user;
+if (me && !me.is_root) return Astro.redirect('/');
+---
+
+<Base title="用户" description="平台用户与权限">
+  <section class="page-head">
+    <h1>用户</h1>
+    <p class="muted">管理谁能登录本平台，以及各用户能访问哪些东软账号。</p>
+  </section>
+  {me ? <UsersPanel client:load me={me.username} /> : null}
+</Base>

@@ -1,0 +1,17 @@
+[package]
+name = "neumooc-core"
+version = "0.1.0"
+edition = "2021"
+description = "东软智慧教育协议层（从 Python 版一比一移植）"
+
+[dependencies]
+# 只依赖协议必需的东西，不引入 web / db —— 这一层要能被 server 与别的宿主复用
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+log = "0.4"

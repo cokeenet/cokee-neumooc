@@ -1,0 +1,18 @@
+---
+/**
+ * 账号管理：列表 + 添加（自动解析租户并验证登录）+ 删除 + 改密。
+ * 表单逻辑用 React 岛屿，因为需要异步提交与错误展示。
+ */
+import Base from '../layouts/Base.astro';
+import AccountsPanel from '../components/AccountsPanel.tsx';
+---
+
+<Base title="账号" description="东软账号管理">
+  <section class="page-head">
+    <h1>账号</h1>
+    <p class="muted">
+      添加后平台会自动解析租户并验证登录，<strong>无需滑块验证</strong>。
+    </p>
+  </section>
+  <AccountsPanel client:load />
+</Base>

@@ -1,0 +1,16 @@
+---
+/** 调度：每日检查（有没有新资源要刷、有没有新作业要写）。 */
+import Base from '../layouts/Base.astro';
+import SchedulerPanel from '../components/SchedulerPanel.tsx';
+---
+
+<Base title="调度" description="每日检查新资源与新作业">
+  <section class="page-head">
+    <h1>调度</h1>
+    <p class="muted">
+      每天定时检查一次：有没有新上传的课程资源要刷、有没有新作业要写。
+      只检查、不代刷 —— 要不要刷由你在「刷课」页手动触发。
+    </p>
+  </section>
+  <SchedulerPanel client:load />
+</Base>

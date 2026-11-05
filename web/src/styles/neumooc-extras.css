@@ -1,0 +1,672 @@
+/**
+ * neumooc-platform 特有样式。
+ *
+ * 通用部分（主题变量、导航、卡片、按钮、表格、徽标、表单、日志、页脚）
+ * 已抽到共用包 `korikura-webui` —— 本项目与 同类平台 原先各维护一份，
+ * 实测依赖版本、主题变量、CSS 选择器 96% 相同。
+ *
+ * 这里只留**本项目独有**的：页面标题、统计卡片、顶部提示条、消息条、
+ * 空状态补充、进度条、待办条、间距工具类。
+ *
+ * ⚠️ 必须在 `korikura-webui/styles.css` **之后**引入，才能覆盖。
+ */
+
+/* 包里没有、但本项目导航用到的 */
+.nav-inner {
+  width: var(--container);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+/* ============================================================
+   本平台补充：页面标题与统计卡片
+   （korikura 主题没有这两个，同类平台 用内联样式绕过了）
+   ============================================================ */
+.page-head {
+  margin: 4px 0 18px;
+}
+.page-head h1 {
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+}
+.page-head p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.stat {
+  padding: 18px 20px;
+}
+.stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 6px;
+}
+.stat-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* 表单与按钮的补充（表单页要用） */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.field label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+}
+.input:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  border-color: var(--primary);
+}
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.spacer { flex: 1 }
+
+
+/* 通知条 */
+.notice {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 14px;
+  font-size: 14px;
+  border: 1px solid transparent;
+}
+.notice-ok   { background: color-mix(in oklch, var(--ok) 12%, transparent);     border-color: color-mix(in oklch, var(--ok) 35%, transparent); }
+.notice-err  { background: color-mix(in oklch, var(--danger) 12%, transparent); border-color: color-mix(in oklch, var(--danger) 35%, transparent); }
+.notice-warn { background: color-mix(in oklch, var(--warn) 15%, transparent);   border-color: color-mix(in oklch, var(--warn) 40%, transparent); }
+
+.form-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.form-row .field { margin-bottom: 0; min-width: 160px; flex: 1 }
+
+.btn-sm { padding: 4px 10px; font-size: 13px }
+.btn:disabled { opacity: .55; cursor: not-allowed }
+.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger) }
+
+.small { font-size: 13px }
+
+/* 进度条 */
+.progress {
+  height: 7px;
+  background: var(--border);
+  border-radius: 99px;
+  overflow: hidden;
+  min-width: 90px;
+}
+.progress > span { display: block; height: 100%; background: var(--ok); border-radius: 99px }
+
+/* 日志面板 */
+.log-panel {
+  background: oklch(0.18 0 0);
+  color: oklch(0.92 0 0);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  height: 380px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-ok    { color: oklch(0.80 0.15 150) }
+.log-warn  { color: oklch(0.85 0.14 80) }
+.log-error { color: oklch(0.75 0.17 25) }
+.log-info  { color: oklch(0.80 0 0) }
+
+.res-list { list-style: none; padding: 0; margin: 10px 0 0 }
+.res-list li {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13.5px;
+}
+.res-list li:last-child { border-bottom: none }
+
+/* 登录页样式已收进 korikura-webui（styles/login.css + components/LoginCard），
+   本项目不再维护副本 —— 数值漂过一次（最小高度 120px vs 140px）。 */
+
+/* 顶栏用户区 */
+.nav-user {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; color: var(--muted);
+}
+
+/* ============================================================
+   对齐 同类平台：顶部提示条 + 消息条
+   ============================================================ */
+
+/* 顶部导航的行内提示条（替代 alert()）。固定顶部居中，4 秒后淡出。 */
+.nav-toast {
+  position: fixed;
+  top: calc(var(--nav-h) + 10px);
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  z-index: 80;
+  max-width: 92vw;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--danger, oklch(0.6 0.2 25));
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.88rem;
+  box-shadow: 0 10px 28px oklch(0 0 0 / 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s;
+}
+.nav-toast.is-show { opacity: 1; transform: translateX(-50%) translateY(0) }
+
+/* 徽标：`.badge` 是 inline-flex，用作消息条时必须块级化，否则长文本居中裁剪。
+   这是 同类平台 记录过的坑，照抄它们的做法。 */
+.badge-run { background: color-mix(in oklch, var(--warn) 18%, transparent); border-color: color-mix(in oklch, var(--warn) 40%, transparent) }
+
+/* 四态消息条（配合 useCall 的 msg.kind） */
+.msg-bar {
+  display: block;
+  text-align: left;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 0.87rem;
+}
+.msg-ok   { background: color-mix(in oklch, var(--ok) 12%, transparent);     border-color: color-mix(in oklch, var(--ok) 35%, transparent) }
+.msg-err  { background: color-mix(in oklch, var(--danger) 12%, transparent); border-color: color-mix(in oklch, var(--danger) 35%, transparent) }
+.msg-warn { background: color-mix(in oklch, var(--warn) 15%, transparent);   border-color: color-mix(in oklch, var(--warn) 40%, transparent) }
+
+/* 卡片标题右侧的元信息：`.card-title` 是 flex，需要 marginLeft:auto */
+.card-meta { margin-left: auto; font-weight: 400; font-size: 0.85rem; color: var(--muted) }
+
+/* ── 间距工具类（对齐 同类平台）──────────────────────────
+   它的 .card 本身没有 margin，靠页面显式加 .mt-24 等类来分隔。
+   照搬这套，避免卡片贴在一起。 */
+.mt-16 { margin-top: 16px }
+.mt-24 { margin-top: 24px }
+
+/* 页面标题（同类平台 用 .page-title/.page-desc，本平台原先自造了
+   .page-head，两者保留以兼容既有页面） */
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 6px;
+}
+.page-desc {
+  color: var(--muted);
+  margin: 0 0 22px;
+  font-size: 0.92rem;
+}
+
+/* ══════════════════════════════════════════════════════════
+   UI 重做补丁（见 docs/UI-REDESIGN.md）
+   ══════════════════════════════════════════════════════════ */
+
+/* 补齐缺失的警告态徽标。
+   原先 badge-warn 被 6 处引用却从未定义，警告徽标全都渲染成无色，
+   和普通文本几乎没区别 —— 这是审计发现的真 bug。 */
+.badge-warn {
+  color: color-mix(in oklch, var(--warn) 72%, var(--text));
+  background: color-mix(in oklch, var(--warn) 20%, transparent);
+  border-color: color-mix(in oklch, var(--warn) 45%, transparent);
+}
+
+/* ── 空状态 ───────────────────────────────────────────── */
+
+/* .empty-state / .empty-title / .empty-desc / .is-error
+   已收进 korikura-webui 的 components.css（原样搬过去的，视觉不变）——
+   这里不再重复定义，避免"改一处、另一处没跟上"。 */
+
+/* ── 统计卡补充：解释数字含义 / 语义着色 ───────────────── */
+
+.stat-hint {
+  margin-top: 6px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.stat-ok   { color: var(--ok) }
+.stat-warn { color: color-mix(in oklch, var(--warn) 78%, var(--text)) }
+.stat-fail { color: var(--danger) }
+
+/* ── 待办条（概览首屏「需要注意」）───────────────────── */
+
+.todo-list { display: flex; flex-direction: column; gap: 10px }
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in oklch, var(--warn) 32%, var(--border));
+  background: color-mix(in oklch, var(--warn) 8%, transparent);
+}
+.todo-item.tone-fail {
+  border-color: color-mix(in oklch, var(--danger) 32%, var(--border));
+  background: color-mix(in oklch, var(--danger) 8%, transparent);
+}
+.todo-item.tone-info {
+  border-color: var(--border);
+  background: color-mix(in oklch, var(--muted) 5%, transparent);
+}
+.todo-body { flex: 1; min-width: 0 }
+.todo-title { font-weight: 600; font-size: 0.92rem; color: var(--text) }
+.todo-sub { margin-top: 2px; font-size: 0.82rem; color: var(--muted) }
+
+/* ── 进度条（课程表 / 刷课总进度）────────────────────── */
+
+.pbar { display: flex; align-items: center; gap: 8px; min-width: 150px }
+.pbar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--muted) 20%, transparent);
+  overflow: hidden;
+}
+.pbar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.3s var(--ease);
+}
+.pbar-fill.is-done { background: var(--ok) }
+.pbar-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 表格里的次要说明，和主文案拉开层次 */
+.table .sub { font-size: 0.78rem; color: var(--muted) }
+
+/* ══════════════════════════════════════════════════════════
+   移动端（≤640px）—— **必须放在文件最末**
+
+   这些规则原先散落在文件中部，而后续追加的补丁段（「本平台补充」
+   「对齐 同类平台」「UI 重做补丁」）在它们之后重新定义了同名类。
+   同为 (0,1,0) 特异性时**后者胜出**，媒体查询本身不带特异性，
+   于是 .input 的 16px（防 iOS 聚焦缩放）、.stat-value 的 1.4rem、
+   .page-desc 的 0.85rem 等移动端规则全部失效。
+   合并到文件末尾，保证移动端规则真正生效。
+   ══════════════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+  /* ── 导航 ─────────────────────────────────────────── */
+
+  /* 汉堡按钮：只在手机上出现 */
+  .nav-burger {
+    display: grid;
+    flex: 0 0 auto;
+  }
+
+  /* 手机上隐藏横向链接条（改由抽屉承载），并让 logo 不再抢宽度 */
+  .nav-links {
+    display: none;
+  }
+
+  .nav-inner {
+    gap: 8px;
+    min-width: 0;
+  }
+
+  /* logo 只留图标：文字占 148px，是"看不到菜单项"的主因 */
+  .logo-text {
+    display: none;
+  }
+
+  .nav-actions {
+    gap: 6px;
+  }
+
+  /* ── 抽屉菜单 ─────────────────────────────────────── */
+
+  /* 抽屉本体不占位：真正的面板由 .nav-drawer-panel 绝对定位 */
+  .nav-drawer {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    z-index: 60;
+  }
+
+  /* 面板从导航栏正下方展开，不盖住页面标题 */
+  .nav-drawer-panel {
+    top: calc(var(--nav-h) + 6px);
+  }
+
+  .nav-drawer-handle {
+    list-style: none;
+    cursor: pointer;
+    padding: 7px 13px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    font-size: 0.85rem;
+    user-select: none;
+    /* 汉堡按钮就是抽屉开关（见 Navbar 脚本）。
+       这里把 summary 收成 0 尺寸，避免出现第二个入口。 */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    border: 0;
+  }
+
+  .nav-drawer-handle::-webkit-details-marker {
+    display: none;
+  }
+
+  .nav-drawer[open] .nav-drawer-handle {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  /* 面板：一行两个，9 项两屏内看完，且每项都是 44px 触控高度 */
+  .nav-drawer-panel {
+    position: fixed;
+    left: 3vw;
+    min-width: 232px;
+    max-width: 94vw;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 10px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    box-shadow: 0 12px 32px oklch(0 0 0 / 0.18);
+  }
+
+  .nav-drawer-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 8px 10px;
+    border-radius: var(--radius-md);
+    font-size: 0.9rem;
+    color: var(--text);
+    background: color-mix(in oklab, var(--primary) 7%, transparent);
+  }
+
+  .nav-drawer-link[aria-current='page'] {
+    color: var(--primary);
+    background: color-mix(in oklab, var(--primary) 18%, transparent);
+    font-weight: 600;
+  }
+
+  /* ── 布局与间距 ───────────────────────────────────── */
+
+  :root {
+    --container: 94vw;
+  }
+
+  .card {
+    padding: 14px;
+    border-radius: var(--radius-md);
+  }
+
+  .grid {
+    gap: 12px;
+  }
+
+  /* 概览页统计卡：手机上 2×2，别一张占满一屏 */
+  .grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-value {
+    font-size: 1.4rem;
+  }
+
+  .stat-label {
+    font-size: 0.8rem;
+  }
+
+  .card-title {
+    font-size: 1rem;
+  }
+
+  .page-title {
+    font-size: 1.5rem;
+  }
+
+  .page-desc {
+    font-size: 0.85rem;
+  }
+
+  /* ── 表格：按内容撑开 + 外层横滚 ──────────────────── */
+
+  /* 关键：`overflow-x:auto` 本身**不会**限制宽度 —— 没有显式约束时，
+     它仍会被内容撑大（实测 .table-wrap 在 390px 视口里变成 941px，
+     把整页顶出 595px 溢出）。必须先给它 `width:100%` + `max-width:100%`
+     + `min-width:0`，把宽度钉死在容器上，横滚才会真正生效。 */
+  .table-wrap {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .table-wrap > .table {
+    width: max-content;
+    min-width: 100%;
+  }
+
+  /* 卡片本身也要允许子元素收缩，否则包裹层仍然撑破布局 */
+  .card {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .table th,
+  .table td {
+    white-space: nowrap;
+  }
+
+  /* 操作列里那排按钮不要换行 —— 换行会把行高从 65px 撑到 452px */
+  .table td .row {
+    flex-wrap: nowrap;
+  }
+
+  /* ── 触控目标 ≥44px（Apple/Google 的触控建议值）─── */
+
+  .btn,
+  .icon-btn.btn-sm,
+  button.btn-sm {
+    min-height: 44px;
+  }
+
+  /* 表格内的行内小按钮：44px 会让表格过高，折中到 38px */
+  .table .btn {
+    min-height: 38px;
+    padding: 6px 10px;
+  }
+
+  .input,
+  select.input {
+    min-height: 44px;
+    font-size: 16px; /* <16px 时 iOS 会在聚焦时自动放大页面 */
+  }
+
+  /* 日志面板在手机上给个舒服的高度 */
+  .log-panel {
+    max-height: 46vh;
+  }
+
+  /* 代码块/长串（手机号、坐标）允许折行，避免撑宽页面 */
+  .mono {
+    word-break: break-all;
+  }
+
+  .stat-value { font-size: 22px }
+  .stat-grid { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) }
+}
+
+/* 执行详情里的原始 JSON 块：长串要能换行，否则会撑宽表格 */
+.log-detail {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-width: 520px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--muted) 6%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+}
+
+/* ── 考试面板 ──
+   题目卡片要能一眼分清「我选的」「正确的」「选错的」三种状态，
+   所以用左侧色条 + 徽标双重编码（只靠颜色对色弱不友好）。 */
+.exam-name {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--primary); font: inherit; text-align: left;
+}
+.exam-name:hover { text-decoration: underline; }
+.exam-paper { border-top: 1px dashed var(--border); margin-top: 12px; padding-top: 12px; }
+.exam-paper-stats {
+  display: inline-block; min-width: 150px; margin: 0 20px 12px 0; vertical-align: top;
+}
+.exam-paper-stats .stat-value { font-size: 22px; margin-bottom: 2px; }
+.exam-paper-meta {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  font-size: 13px; color: var(--muted);
+  padding: 8px 0 4px; border-top: 1px solid var(--border); margin-bottom: 8px;
+}
+.exam-part { margin-top: 18px; }
+.exam-part-title {
+  font-size: 15px; font-weight: 600; margin: 0 0 10px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.exam-q {
+  padding: 10px 0 12px; border-bottom: 1px solid rgba(255, 255, 255, .05);
+}
+.exam-q:last-child { border-bottom: 0; }
+.exam-q-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.exam-q-no { font-weight: 600; font-size: 13px; }
+.exam-q-score { margin-left: auto; font-size: 13px; font-variant-numeric: tabular-nums; }
+.exam-q-stem { margin: 0 0 8px; line-height: 1.7; }
+.exam-choices { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.exam-choice {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--border); border-left-width: 3px;
+  font-size: 14px; line-height: 1.5;
+}
+.exam-choice-letter {
+  flex: none; width: 18px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 50%; background: rgba(255, 255, 255, .08);
+  font-size: 11px; font-weight: 600;
+}
+.exam-choice-text { flex: 1; }
+.exam-choice-flags { flex: none; display: flex; gap: 4px; }
+/* 选对了 */
+.exam-choice.is-right { border-color: var(--ok); border-left-color: var(--ok); background: rgba(46, 160, 67, .10); }
+/* 该选但没选 */
+.exam-choice.is-correct { border-left-color: var(--ok); }
+/* 选了但错了 */
+.exam-choice.is-wrong { border-color: var(--danger); border-left-color: var(--danger); background: rgba(248, 81, 73, .10); }
+/* 主观题/未公布答案时只是「我选了」 */
+.exam-choice.is-picked { border-left-color: var(--primary); }
+.exam-answer, .exam-analysis {
+  margin: 8px 0 0; font-size: 13px; line-height: 1.7;
+}
+.exam-analysis {
+  padding: 8px 10px; border-radius: 6px;
+  background: rgba(255, 255, 255, .04);
+}
+
+/* ── 考试页：左右两栏 ──
+   左窄右宽：左边选考试、右边看题目。
+   左栏自己滚动（max-height + overflow），避免长列表把右栏顶出视口。 */
+.exams-split {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 24px;
+}
+.exams-split > .card { margin-top: 0; }
+.exam-list-card { position: sticky; top: 16px; }
+.exam-list {
+  list-style: none; margin: 0; padding: 0;
+  max-height: calc(100vh - 220px); overflow-y: auto;
+}
+.exam-list-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name score" "meta score";
+  gap: 2px 8px;
+  width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-left: 3px solid transparent;
+  padding: 9px 10px; border-radius: 6px;
+  color: var(--fg); font: inherit;
+}
+.exam-list-item:hover { background: rgba(255, 255, 255, .05); }
+.exam-list-item.is-active {
+  background: rgba(255, 255, 255, .08);
+  border-left-color: var(--primary);
+}
+.exam-item-name { grid-area: name; font-size: 13.5px; line-height: 1.4; }
+.exam-item-meta { grid-area: meta; font-size: 12px; color: var(--muted); }
+.exam-item-score {
+  grid-area: score; align-self: center;
+  font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.exam-paper-card { min-height: 320px; }
+.exam-paper-head {
+  display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: baseline;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 6px;
+}
+.exam-paper-title { margin: 0; font-size: 16px; }
+.exam-paper-stats { display: flex; flex-direction: column; gap: 2px; }
+.exam-paper-stats .stat-value { font-size: 24px; }
+@media (max-width: 1000px) {
+  .exams-split { grid-template-columns: 1fr; }
+  .exam-list-card { position: static; }
+  .exam-list { max-height: 320px; }
+}

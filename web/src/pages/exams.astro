@@ -1,0 +1,48 @@
+---
+/** 考试：已交卷考试列表 + 题目 / 答案 / 得分。
+ *
+ * 数据是**实时拉取**的（不落库）：分数与批阅状态会变（老师可能改分），
+ * 而一学期就十几场，实时拉一次更准也更简单。
+ */
+import Base from '../layouts/Base.astro';
+import AccountTabs from '../components/AccountTabs.astro';
+import ExamsPanel from '../components/ExamsPanel.tsx';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { serverFetchResult } from '../lib/backend';
+import type { Account } from '../lib/api';
+
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const accounts = accRes.ok ? accRes.data : [];
+const loadError = accRes.ok ? '' : accRes.error;
+const accountId = Number(Astro.url.searchParams.get('account')) || accounts[0]?.id;
+---
+
+<Base title="考试" description="已交卷考试与试卷详情">
+  <section class="page-head">
+    <h1>考试</h1>
+    <p class="muted">
+      该账号所有已交卷的考试。左边选一场，右边看题目、我的答案、标准答案、
+      逐题得分与解析。列表里的分数是<strong>实际得分 / 满分</strong>
+      （实际得分从试卷详情取，打开页面后会在后台逐场补上）。
+    </p>
+  </section>
+
+  {loadError ? (
+    <div class="card">
+      <ErrorState text={loadError} />
+    </div>
+  ) : accountId ? (
+    <>
+      <AccountTabs accounts={accounts} current={accountId} path="/exams" />
+      <ExamsPanel client:load accountId={accountId} />
+    </>
+  ) : (
+    <div class="card">
+      <div class="empty-state">
+        <p class="empty-title">还没有接入账号</p>
+        <p class="empty-desc">添加账号后，就能在这里看到已交卷的考试。</p>
+        <a class="btn btn-primary btn-sm mt-16" href="/accounts">前往「账号」添加</a>
+      </div>
+    </div>
+  )}
+</Base>

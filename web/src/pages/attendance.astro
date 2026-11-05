@@ -1,0 +1,56 @@
+---
+/** 考勤：统计、明细、进行中提醒、补签。 */
+import Base from '../layouts/Base.astro';
+import AccountTabs from '../components/AccountTabs.astro';
+import AttendancePanel from '../components/AttendancePanel.tsx';
+import MakeupPanel from '../components/MakeupPanel.tsx';
+import LiveLog from '../components/LiveLog.tsx';
+import EmptyState from 'korikura-webui/components/ui/EmptyState.astro';
+import ErrorState from 'korikura-webui/components/ui/ErrorState.astro';
+import { serverFetch, serverFetchResult } from '../lib/backend';
+import type { Account } from '../lib/api';
+
+const accRes = await serverFetchResult<Account[]>('/api/accounts');
+const accounts = accRes.ok ? accRes.data : [];
+const loadError = accRes.ok ? '' : accRes.error;
+const accountId = Number(Astro.url.searchParams.get('account')) || accounts[0]?.id;
+---
+
+<Base title="考勤" description="考勤统计与签到提醒">
+  <section class="page-head">
+    <h1>考勤</h1>
+    <p class="muted">出勤统计、场次明细、签到提醒与补签。</p>
+  </section>
+
+  <AccountTabs accounts={accounts} current={accountId} path="/attendance" />
+
+  {loadError ? (
+    <div class="card">
+      <ErrorState text={loadError} />
+    </div>
+  ) : accountId
+    ? (
+      <>
+        <AttendancePanel client:load accountId={accountId} />
+        <MakeupPanel client:load accountId={accountId} />
+
+        {/*
+          **实时日志只在这一处。**
+          原先 AttendancePanel 与 MakeupPanel 各自订阅一次、各渲染一块 ——
+          同一页出现两个一模一样的「实时日志」。
+          提到页面级之后，两个面板都不再自己订阅。
+        */}
+        <LiveLog client:load accountId={accountId} />
+      </>
+    )
+    : (
+      <div class="card">
+        <EmptyState
+          title="还没有接入账号"
+          desc="添加账号后，平台会自动同步考勤并在签到场次出现时提醒你。"
+          href="/accounts"
+          action="前往「账号」添加"
+        />
+      </div>
+    )}
+</Base>

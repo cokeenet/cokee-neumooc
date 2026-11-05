@@ -1,0 +1,57 @@
+# 数据与密钥（含凭据，绝不能提交）
+server/data/
+server/data_test/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak-*
+secret.key
+
+# 抓包与会话（含有效 token）
+protocol/session.json
+archive/protocol-raw/session.json
+probe/
+probe/*.png
+
+# 历史物料（见 archive/README.md；确认不需要后可整个删除）
+archive/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.astro/
+pnpm-debug.log*
+npm-debug.log*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Rust
+rust/target/
+
+# 开源接手指引（内部材料：含私有项目名与部署细节，勿提交）
+OPEN-SOURCE-HANDOVER.md
+
+# 页面截图（验证脚本会生成，内容含真实账号名/学号，不要进仓库）
+docs/screenshots/
+
+# 部署配置（含真实 VPS IP、域名、服务单元），**不进仓库**
+deploy/
+
+# 探索/诊断脚本与协议验证脚本（含 session.json 引用、本机路径）—— 不公开
+tools/
+protocol/
+
+# 早期 Python 后端（保留作协议参考，不公开）
+server/

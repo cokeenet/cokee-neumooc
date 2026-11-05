@@ -1,0 +1,262 @@
+//! Rust 版服务入口。
+//!
+//! 环境变量与 Python 版保持一致，便于直接替换：
+//!
+//! | 变量 | 默认 | 说明 |
+//! | --- | --- | --- |
+//! | `NEUMOOC_DATA` | `data` | 数据目录（放 `neumooc.db` 与 `secret.key`） |
+//! | `NEUMOOC_HOST` | `127.0.0.1` | 监听地址 |
+//! | `NEUMOOC_PORT` | `8788` | 监听端口 |
+
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use neumooc_server::{api, db};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ⚠️ 必须初始化。没有它，所有 `log::info!` 都被**静默丢弃** ——
+    // 表现是「后台循环明明在跑，日志里却一个字都没有」，非常难查。
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let data = std::env::var("NEUMOOC_DATA").unwrap_or_else(|_| "data".into());
+    let host = std::env::var("NEUMOOC_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let port: u16 = std::env::var("NEUMOOC_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8788);
+
+    let db_path = std::path::Path::new(&data).join("neumooc.db");
+    if let Some(dir) = db_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let conn = db::open(&db_path)?;
+    println!("[neumooc] 数据库：{}", db_path.display());
+
+    // 启动时把上次进程留下的 running 标成 failed —— 否则那些 job 的
+    // 「已在跑」名额永远占着，该账号再也发不起同类任务
+    let n = neumooc_server::store::reset_stale_running(&conn)?;
+    if n > 0 {
+        println!("[neumooc] 已把 {n} 条残留执行标为 failed");
+    }
+
+    let key_path = std::path::Path::new(&data).join("secret.key");
+    let cipher = std::sync::Arc::new(
+        neumooc_server::crypto::CredentialCipher::from_file(&key_path)?,
+    );
+    println!("[neumooc] 凭据密钥：{}", key_path.display());
+
+    let state = api::AppState::new(conn, cipher);
+
+    // 后台循环：调度器 + 考勤监控。没有这两条，库里那些配置就只是死数据。
+    spawn_background(state.clone());
+    let app = api::router(state.clone());
+
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    println!("[neumooc] 监听 http://{addr}");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    println!("[neumooc] 已停止");
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    println!("[neumooc] 收到停止信号…");
+}
+
+/// 起后台循环。
+///
+/// 两个循环各跑各的：
+/// * 调度器每 30 秒看一次有没有到点的「每日检查」计划
+/// * 考勤监控每 60 秒看一次有没有「进行中且未签」的考勤，开着自动签到的账号直接签
+///
+/// 用**阻塞线程**而不是 tokio task：这两件事本质是「定时 + 打阻塞式 HTTP」，
+/// 塞进 async 里反而要用 spawn_blocking 绕一圈，还容易把运行时线程占满。
+fn spawn_background(state: Arc<api::AppState>) {
+    // 调度器
+    {
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("scheduler".into())
+            .spawn(move || loop {
+                {
+                    let conn = st.conn();
+                    if let Err(e) = neumooc_server::scheduler::Scheduler::ensure_today_plans(&conn) {
+                        eprintln!("[scheduler] 生成计划失败：{e}");
+                    }
+                    match neumooc_server::scheduler::Scheduler::due_plans(&conn) {
+                        Ok(plans) => {
+                            for (plan_id, account_id) in plans {
+                                // 交给该账号的 worker 串行执行
+                                let ctx = st.tasks.clone();
+                                let mut reg = st.workers.lock().expect("锁中毒");
+                                let w = reg.get_or_spawn(account_id);
+                                let _ = w.submit(neumooc_server::worker::Job::new(
+                                    "check",
+                                    move |token| neumooc_server::tasks::run_scan(&ctx, account_id, token),
+                                ));
+                                let _ = conn.execute(
+                                    "UPDATE daily_plans SET state='done', updated_at=? WHERE id=?",
+                                    rusqlite::params![neumooc_server::db::now_ms(), plan_id],
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("[scheduler] 取计划失败：{e}"),
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(
+                    neumooc_server::scheduler::SCHEDULER_TICK_SECS,
+                ));
+            })
+            .expect("起调度器线程失败");
+    }
+
+    // 考勤监控
+    {
+        let st = state.clone();
+        std::thread::Builder::new()
+            .name("attendance".into())
+            .spawn(move || {
+                let watcher = neumooc_server::scheduler::AttendanceWatcher::new(
+                    neumooc_server::notify::Notifier::from_env(),
+                );
+                // 正在跑的账号（内存闸门）。不用 `begin_execution` 当闸门了 ——
+                // 那会在没有可签场次时也每分钟插一条执行记录
+                // （3 个账号 = 4320 行/天，运行日志会被刷满）。
+                let auto_inflight: Arc<Mutex<HashSet<i64>>> = Default::default();
+                // 硬错误（登录失效/网络）的**限频**记录：每账号 15 分钟最多一条
+                let auto_last_err: Arc<Mutex<HashMap<i64, i64>>> = Default::default();
+                loop {
+                    // ── ① 开着自动签到的账号：**每分钟**同步 + 立即签 ──
+                    //
+                    // 为什么不复用缓存：`attendance` 表只有手动「同步考勤」才会更新，
+                    // 实测 9 个账号里 7 个的缓存是 140 小时前的 —— 新考勤根本不在库里，
+                    // 「开着自动签到」等于没开。所以这里自己做「同步→挑→签」。
+                    //
+                    // 为什么合在一个任务里：监控一轮就是 60 秒（ATTENDANCE_TICK_SECS），
+                    // 拆成「本轮同步、下轮签」最坏要等 2 分钟，而考勤窗口常常只有几分钟。
+                    let auto_ids = {
+                        let conn = st.conn();
+                        neumooc_server::scheduler::AttendanceWatcher::auto_sign_accounts(&conn)
+                            .unwrap_or_default()
+                    };
+                    for aid in auto_ids {
+                        // 内存闸门：上一轮还没跑完就跳过（不会堵住别的账号）
+                        {
+                            let mut g = auto_inflight.lock().expect("锁中毒");
+                            if !g.insert(aid) {
+                                continue;
+                            }
+                        }
+                        let ctx = st.tasks.clone();
+                        let st3 = st.clone();
+                        let inflight = auto_inflight.clone();
+                        let last_err = auto_last_err.clone();
+                        let mut reg = st.workers.lock().expect("锁中毒");
+                        let w = reg.get_or_spawn(aid);
+                        let _ = w.submit(neumooc_server::worker::Job::new(
+                            "auto-checkin",
+                            move |token| {
+                                // 无论正常返回还是 panic 展开，离开作用域都会放行
+                                struct Release(Arc<Mutex<HashSet<i64>>>, i64);
+                                impl Drop for Release {
+                                    fn drop(&mut self) {
+                                        if let Ok(mut g) = self.0.lock() {
+                                            g.remove(&self.1);
+                                        }
+                                    }
+                                }
+                                let _release = Release(inflight, aid);
+
+                                let r = neumooc_server::tasks::run_auto_sync_sign(&ctx, aid, token);
+
+                                // ── **只有真签了 / 有失败，才落执行记录** ──
+                                // 每分钟一条「同步 0 场」的空记录没有信息量，
+                                // 只会污染「运行日志」页、并让 executions 表每天涨几千行。
+                                let signed = r
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|v| v.get("signed"))
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let failed_n = r
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|v| v.get("failed"))
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.len())
+                                    .unwrap_or(0);
+                                let hard_err = r.is_err();
+                                if signed == 0 && failed_n == 0 && !hard_err {
+                                    return r;
+                                }
+                                // 硬错误限频：密码失效时别每分钟刷一条
+                                if hard_err {
+                                    let now = neumooc_server::db::now_ms();
+                                    let mut m = last_err.lock().expect("锁中毒");
+                                    let last = m.get(&aid).copied().unwrap_or(0);
+                                    if now - last < 15 * 60 * 1000 {
+                                        return r;
+                                    }
+                                    m.insert(aid, now);
+                                }
+                                if let Ok(conn) = st3.db.lock() {
+                                    let (state, detail) = match &r {
+                                        Ok(v) => ("done", v.clone()),
+                                        Err(e) => (
+                                            "failed",
+                                            serde_json::json!({ "error": e.to_string() }),
+                                        ),
+                                    };
+                                    if let Ok(Some(exec_id)) =
+                                        neumooc_server::store::begin_execution(&conn, aid, "auto-checkin")
+                                    {
+                                        let msg = if state == "done" {
+                                            format!(
+                                                "自动签到：签了 {signed} 场{}",
+                                                if failed_n > 0 {
+                                                    format!("，{failed_n} 场失败")
+                                                } else {
+                                                    String::new()
+                                                }
+                                            )
+                                        } else {
+                                            format!("自动签到 failed：{detail}")
+                                        };
+                                        let _ = neumooc_server::store::append_log(
+                                            &conn,
+                                            exec_id,
+                                            if state == "done" && failed_n == 0 { "ok" } else { "error" },
+                                            &msg,
+                                        );
+                                        let _ = neumooc_server::store::finish_execution(
+                                            &conn, exec_id, state, detail,
+                                        );
+                                    }
+                                }
+                                r
+                            },
+                        ));
+                    }
+
+                    // ── ② 提醒：所有账号读缓存，发现「进行中未签」就发通知 ──
+                    // （没开自动签到的账号只提醒不签；开了的上面已经处理）
+                    {
+                        let conn = st.conn();
+                        let _ = watcher.tick(&conn);
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        neumooc_server::scheduler::ATTENDANCE_TICK_SECS,
+                    ));
+                }
+            })
+            .expect("起考勤监控线程失败");
+    }
+    println!("[neumooc] 调度器与考勤监控已启动");
+}
