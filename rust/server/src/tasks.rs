@@ -2342,6 +2342,13 @@ pub fn run_ai_answer_bulk_with(
         "total": qs.len(), "answered": answers.len(), "unknown": unknown,
         "skipped_unsupported": skipped_unsupported,
         "submitted": submitted, "history_id": e.history_id, "logs": logs,
+        // **始终带上答案列表**（不只 dry_run）：
+        // 平台不返回已保存的草稿答案（`candidateAnswer` 恒为 null），
+        // 前端要回填到作答态只能靠这里。顺带也让接口自解释 ——
+        // 调用方不用再猜"AI 到底填了什么"。
+        "answers": answers.iter().map(|a| json!({
+            "no": a.question_no, "type": a.question_type, "answer": a.answer,
+        })).collect::<Vec<_>>(),
     }))
 }
 

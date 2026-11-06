@@ -674,21 +674,46 @@
 /* ── AI 实时输出（思考 / 答案） ──
  *
  * `think` 和 `answer` 是 LLM 流式增量写进 logs 的两个级别（见
- * `tasks.rs::LogSink`）。包里没有这两级，所以在这里补样式：
+ * `tasks.rs::LogSink`）。
  *
- * * 思考：灰字 + 斜体 + 左边框 —— 要能看见，但不能抢答案的注意力
- * * 答案：正常字色 —— 这是用户真正要的东西
+ * ⚠️ 这里**必须覆盖 `.log-panel` 的深色底**。包里 `.log-panel` 是
+ *    `background: oklch(0.18 0 0)`（近黑）+ 浅色字，那是给滚动日志用的。
+ *    AI 面板是**读**的（大段思考过程），深底 + 灰字在浅色主题下看不清，
+ *    深色主题下又太扎眼 —— 所以这里单独给浅色版。
  */
-.log-line.is-think {
-  color: var(--muted, #6b7280);
-  font-style: italic;
-  border-left: 2px solid rgba(107, 114, 128, 0.35);
-  padding-left: 8px;
-  opacity: 0.9;
+.ai-live-panel {
+  background: var(--surface-2, #f8fafc);
+  color: var(--fg, #111827);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: 13px;
+  line-height: 1.75;
+  height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-live-panel.answer-box { height: 90px }
+
+.ai-live-panel .log-line {
+  border-left: 3px solid transparent;
+  padding-left: 9px;
+  margin: 1px 0;
 }
 
-.log-line.is-answer {
+/* 思考：次要信息，但仍要可读 —— 不能像注释一样淡到看不见 */
+.ai-live-panel .log-line.is-think {
+  color: var(--muted, #475569);
+  font-style: italic;
+  border-left-color: rgba(100, 116, 139, 0.35);
+}
+
+/* 答案：正常字色 + 绿色左框，一眼能认出这是结果 */
+.ai-live-panel .log-line.is-answer {
   color: var(--fg, #111827);
-  border-left: 2px solid rgba(34, 197, 94, 0.55);
-  padding-left: 8px;
+  font-weight: 500;
+  border-left-color: rgba(34, 197, 94, 0.7);
+  font-family: var(--font-mono);
 }

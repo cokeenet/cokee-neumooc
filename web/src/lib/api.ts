@@ -123,6 +123,13 @@ export const api = {
 
   executions: (accountId?: number) =>
     req<Execution[]>(`/executions${accountId ? `?account_id=${accountId}` : ''}`),
+  /**
+   * 读一次执行。
+   *
+   * `detail` 可能是**对象**（新后端会解析）或**字符串**（老记录的原始 TEXT），
+   * 调用方要按需 `typeof` 判断 —— 早期版本这里当成对象直接读字段，
+   * 结果 `answered` 永远是 undefined。
+   */
   execution: (id: number) => req<Execution>(`/executions/${id}`),
   logs: (id: number) => req<LogRow[]>(`/executions/${id}/logs`),
   cancel: (id: number) => req<{ ok: boolean }>(`/executions/${id}/cancel`, { method: 'POST' }),

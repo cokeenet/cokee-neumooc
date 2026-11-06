@@ -356,6 +356,7 @@ export default function TasksPanel({ accountId }: Props) {
     if (r) setAnswerNote(submit ? `已交卷（${r.saved ?? 0} 题）` : `已保存草稿（${r.saved ?? 0} 题）`);
   }, [answerAction]);
 
+
   /** AI 作答的执行 id —— 用来订阅实时日志 */
   const [aiExecId, setAiExecId] = useState<number | null>(null);
   /** 实时流：思考过程 + 答案增量（AI 作答时边算边看） */
@@ -380,13 +381,52 @@ export default function TasksPanel({ accountId }: Props) {
         }
       }
     }
-    const r = { answered: 0, total: 0, submitted: false } as { answered?: number; total?: number; submitted?: boolean };
-    // AI 答完后刷新详情，让用户看到保存的答案
+    // 拉最终结果（答案、思考日志都在里面）
+    const ex = eid ? await api.execution(eid).catch(() => null) : null;
+    // `detail` 可能是对象或 JSON 字符串（老记录），两种都接住
+    const rawDetail = ex?.detail ?? {};
+    const detail = (typeof rawDetail === 'string'
+      ? (() => { try { return JSON.parse(rawDetail); } catch { return {}; } })()
+      : rawDetail) as {
+        answered?: number; total?: number; submitted?: boolean;
+        unknown?: string[]; logs?: { level: string; message: string }[];
+      };
+    const answered = detail.answered ?? 0;
+
+    // AI 答完后刷新详情 —— 否则界面上还是「尚未提交 · 题目预览」，
+    // 用户看到"答案出来了"却没填进去（这已经是踩过一次的坑）。
     detailCache.current.delete(openId);
     const t = items.find((x) => x.test_id === openId);
     if (t) await selectTask(t);
-    return r;
+
+    // 把 AI 算出的答案**回填到作答态**。
+    //
+    // ⚠️ 不能从平台详情接口取 —— 实测它**不返回已保存的草稿答案**
+    //    （`candidateAnswer` 恒为 null，`candidate_id` 也没有）。
+    //    所以答案只能来自后端返回的 `answers` 列表。
+    const aiAnswers = (detail as { answers?: { no: string; answer: string }[] }).answers ?? [];
+    if (aiAnswers.length > 0) {
+      const filled = new Map<string, string>();
+      for (const a of aiAnswers) {
+        if (a.no && a.answer) filled.set(a.no, a.answer);
+      }
+      if (filled.size > 0) {
+        setDraft(filled);
+        setAnswering(true); // 直接进入作答态，答案就在眼前
+      }
+    }
+    return { answered, total: detail.total ?? 0, submitted: detail.submitted ?? false };
   });
+
+  /** AI 作答结果提示（含"跳过几题"的信息） */
+  const [aiNote, setAiNote] = useState('');
+  const doAiAnswer = useCallback(async () => {
+    setAiNote('');
+    const r = await aiAction.run(false);
+    if (r) {
+      setAiNote(`AI 已填好 ${r.answered} 题${r.submitted ? ' 并交卷' : '（草稿，可改后再交）'}`);
+    }
+  }, [aiAction]);
 
   const scoreOf = (d: HomeworkDetail) => {
     const finalScore = typeof d.final_score === 'number' ? d.final_score : null;
@@ -541,7 +581,7 @@ export default function TasksPanel({ accountId }: Props) {
               )}
               <button className="btn btn-sm" disabled={aiAction.busy}
                 title="后端取题 → 调 AI → 一次算完整份答案，保存为草稿（不交卷）"
-                onClick={() => void aiAction.run(false)}>
+                onClick={() => void doAiAnswer()}>
                 {aiAction.busy ? 'AI 作答中…' : 'AI 代答'}
               </button>
             </div>
@@ -591,7 +631,7 @@ export default function TasksPanel({ accountId }: Props) {
                   <summary className="muted small" style={{ cursor: 'pointer' }}>
                     展开思考过程（{live.thinking.split('\n').length} 段）
                   </summary>
-                  <div className="log-panel" style={{ height: 200, marginTop: 6 }}>
+                  <div className="ai-live-panel" style={{ marginTop: 6 }}>
                     {live.thinking.split('\n').map((line, i) => (
                       <div key={i} className="log-line is-think"><span>{line}</span></div>
                     ))}
@@ -601,7 +641,7 @@ export default function TasksPanel({ accountId }: Props) {
               {live.answer && (
                 <div>
                   <span className="muted small">答案：</span>
-                  <div className="log-panel" style={{ height: 120, marginTop: 6 }}>
+                  <div className="ai-live-panel answer-box" style={{ marginTop: 6 }}>
                     {live.answer.split('\n').map((line, i) => (
                       <div key={i} className="log-line is-answer"><span>{line}</span></div>
                     ))}
@@ -616,7 +656,7 @@ export default function TasksPanel({ accountId }: Props) {
             </div>
           )}
 
-          {(answerNote || answerAction.msg || aiAction.msg) && (
+          {(answerNote || aiNote || answerAction.msg || aiAction.msg) && (
             <p
               className={`msg-bar ${(
                 answerAction.msg?.kind === 'err' || aiAction.msg?.kind === 'err'
@@ -624,7 +664,7 @@ export default function TasksPanel({ accountId }: Props) {
               style={{ marginBottom: 10 }}>
               {answerAction.msg?.kind === 'err' || aiAction.msg?.kind === 'err'
                 ? (answerAction.msg?.text || aiAction.msg?.text)
-                : (answerNote || aiAction.msg?.text || answerAction.msg?.text)}
+                : (aiNote || answerNote || aiAction.msg?.text || answerAction.msg?.text)}
             </p>
           )}
 

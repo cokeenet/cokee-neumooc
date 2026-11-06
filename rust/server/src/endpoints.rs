@@ -1770,7 +1770,16 @@ pub async fn get_execution(
         .ok_or_else(|| ApiError::not_found("执行记录不存在"))?;
     let aid = v.get("account_id").and_then(Value::as_i64).unwrap_or(-1);
     own(&conn, &user, aid)?;
-    Ok(Json(v))
+    // `detail` 在库里是 TEXT（JSON 字符串）。原样返回的后果是前端
+    // `detail.answered` 永远是 undefined —— 它拿到的是一个字符串。
+    // 这里解析成对象；解析不了就保留原串（有些老记录不是 JSON）。
+    let mut out = v;
+    if let Some(Value::String(raw)) = out.get("detail").cloned() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+            out["detail"] = parsed;
+        }
+    }
+    Ok(Json(out))
 }
 
 /// `POST /api/executions/:id/cancel` —— 请求中断一个正在跑的执行。
