@@ -350,3 +350,49 @@ mod tests {
         assert_eq!(a.state, "active");
     }
 }
+
+// ───────────────────── 运行时配置（settings 键值表） ─────────────────────
+
+/// 读一个配置项：**环境变量优先**，没有再用数据库里的值。
+///
+/// 优先级这样定是有意的：
+///
+/// * 环境变量能**压过**界面设置 —— 出事时运维改一个 env 就能急停/换 key，
+///   不用登录界面（界面也可能正好是坏的）
+/// * 没设环境变量时用界面设置的，这样日常不用碰 systemd
+pub fn setting(conn: &Connection, key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    conn.query_row(
+        "SELECT value FROM settings WHERE key=?",
+        rusqlite::params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+}
+
+/// 写一个配置项（空字符串 = 删除）。
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    let v = value.trim();
+    if v.is_empty() {
+        conn.execute("DELETE FROM settings WHERE key=?", rusqlite::params![key])?;
+    } else {
+        conn.execute(
+            "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            rusqlite::params![key, v, crate::db::now_ms()],
+        )?;
+    }
+    Ok(())
+}
+
+/// 值是不是从环境变量来的（界面上要提示"被 env 覆盖，改这里不生效"）。
+pub fn setting_from_env(key: &str) -> bool {
+    std::env::var(key).map(|v| !v.trim().is_empty()).unwrap_or(false)
+}

@@ -16,7 +16,7 @@
  * 按**使用频率**分层，不按功能模块平铺：
  *
  * ```
- * 概览 │ 刷课 考勤 作业 │ 课程 账号 │ 运行日志 调度 │ 用户
+ * 概览 │ 刷课 考勤 作业 │ 课程 账号 │ 运行日志 调度 │ 用户 设置
  *      └─── 日常 ───┘   └─ 查阅 ─┘   └── 运维 ──┘   └运维┘
  * ```
  *
@@ -47,6 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/logs', label: '运行日志', tier: 'ops', ready: true, desc: '执行历史与实时日志' },
   { href: '/schedule', label: '调度', tier: 'ops', ready: true, desc: '每日检查与通知通道' },
   { href: '/users', label: '用户', tier: 'ops', ready: true, desc: '平台用户与角色', rootOnly: true },
+  { href: '/settings', label: '设置', tier: 'ops', ready: true, desc: 'AI 与运行时配置', rootOnly: true },
 ];
 
 /** 按角色过滤后的导航项。 */

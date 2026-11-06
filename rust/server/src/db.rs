@@ -156,6 +156,16 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 CREATE INDEX IF NOT EXISTS idx_logs_exec ON logs(execution_id, id);
 
+-- 运行时可改的配置（键值对）。
+--
+-- 与「环境变量」的关系：**环境变量优先**（急停能压过界面设置），
+-- 没设环境变量时才用这里的值。这样既能在界面改，又能用环境变量兜底。
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS daily_plans (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -395,7 +405,12 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 10, "应与 Python 版一样有 10 张表");
+        // Python 版 10 张 + 我们新增的 settings（运行时配置，如 LLM 的 key）
+        //
+        // 这个数字**故意硬编码**：它守的是「表结构没被意外增删」。
+        // 加表时改这里，顺便想一遍「老库迁移写了吗」——
+        // `CREATE TABLE IF NOT EXISTS` 只对新库生效，老库得靠 `migrate()`。
+        assert_eq!(n, 11, "Python 版 10 张 + settings（运行时配置）");
     }
 
     /// **回归**：`resources` 的考核相关列也要能迁移到老库上。

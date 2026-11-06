@@ -1,0 +1,24 @@
+---
+/**
+ * 系统设置（仅管理员）。
+ *
+ * 现在只有 AI/LLM 配置。放在独立页面而不是塞进「用户」页：
+ * 这里改的是**整个平台的行为**（AI 代答用哪个模型），与"谁能登录"是两件事。
+ */
+import Base from '../layouts/Base.astro';
+import SettingsPanel from '../components/SettingsPanel.tsx';
+
+const me = Astro.locals.user;
+if (me && !me.is_root) return Astro.redirect('/');
+---
+
+<Base title="设置" description="平台运行时配置">
+  <section class="page-head">
+    <h1>设置</h1>
+    <p class="muted">
+      AI 配置会立即生效，<strong>不需要重启</strong>。
+      环境变量优先于这里 —— 如果某项被环境变量占用，界面会标出来。
+    </p>
+  </section>
+  {me ? <SettingsPanel client:load me={me.username} /> : null}
+</Base>

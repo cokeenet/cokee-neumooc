@@ -3,6 +3,22 @@
 /** 执行日志一行（后端 `await_execution` 会把 `data.logs` 提到顶层） */
 export interface LogLine { level: string; message: string }
 
+/**
+ * AI 配置。
+ *
+ * `api_key` **永远不回来** —— 后端只回 `has_key` 和 `key_hint`（前 4 后 4 位）。
+ * `*_from_env` 为 true 时说明该项被环境变量压住，界面改了不生效。
+ */
+export interface LlmConfig {
+  has_key: boolean;
+  key_hint: string;
+  model: string;
+  base_url: string;
+  key_from_env: boolean;
+  model_from_env: boolean;
+  base_url_from_env: boolean;
+}
+
 export interface ExecResult<T = unknown> {
   ok: boolean;
   data?: T;
@@ -46,6 +62,13 @@ export const api = {
     req<{ id: number }>('/accounts', { method: 'POST', body: JSON.stringify(body) }),
   patchAccount: (id: number, body: Record<string, unknown>) =>
     req<{ ok: boolean }>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** AI 配置（**key 打码**，只回 has_key 与前后 4 位） */
+  llmConfig: () => req<LlmConfig>('/llm/config'),
+  /** 保存 AI 配置。`api_key` 空 = 不修改；`clear_key` 显式清除 */
+  llmSetConfig: (body: { api_key?: string; model?: string; base_url?: string; clear_key?: boolean }) =>
+    req<{ ok: boolean }>('/llm/config', { method: 'PUT', body: JSON.stringify(body) }),
+  /** 用当前配置真发一次请求 */
+  llmTest: () => req<{ ok: boolean; reply?: string; error?: string }>('/llm/test', { method: 'POST' }),
   /** 设备 ID 全局开关状态 */
   deviceConfig: () => req<{ master_on: boolean; env_var: string; note: string }>('/device-config'),
   /** 开关某账号签到是否带 deviceId（打开时若没有 ID 会自动生成） */

@@ -210,6 +210,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/accounts/:id/tasks/answer", post(crate::endpoints::task_answer))
         .route("/api/accounts/:id/tasks/ai-answer", post(crate::endpoints::task_ai_answer))
         .route("/api/llm/status", get(crate::endpoints::llm_status))
+        .route(
+            "/api/llm/config",
+            get(crate::endpoints::llm_config_get).put(crate::endpoints::llm_config_set),
+        )
+        .route("/api/llm/test", post(crate::endpoints::llm_test))
         .route("/api/llm/ask", post(crate::endpoints::llm_ask))
         .route("/api/notify/test", post(crate::endpoints::notify_test))
         .route("/api/schedule/:id/run-now", post(crate::endpoints::run_now))

@@ -48,6 +48,14 @@ pub fn default_base() -> String {
 }
 
 /// 执行一个任务所需的共享上下文。
+/// LLM 连接配置（key / base_url / model）。
+#[derive(Clone, Debug)]
+pub struct LlmConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+}
+
 pub struct TaskCtx {
     pub conn: Arc<Mutex<Connection>>,
     pub cipher: Arc<CredentialCipher>,
@@ -56,6 +64,24 @@ pub struct TaskCtx {
 impl TaskCtx {
     pub fn new(conn: Arc<Mutex<Connection>>, cipher: Arc<CredentialCipher>) -> Self {
         Self { conn, cipher }
+    }
+
+    /// LLM 配置。**环境变量优先，其次界面设置**（见 `store::setting`）。
+    pub fn llm_config(&self) -> Result<LlmConfig> {
+        let c = self.conn.lock().map_err(|_| Error::Invalid("数据库锁中毒".into()))?;
+        let api_key = store::setting(&c, "NEUMOOC_LLM_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            return Err(Error::Invalid(
+                "AI 未配置：到「系统设置」填 API Key，或设环境变量 NEUMOOC_LLM_API_KEY".into(),
+            ));
+        }
+        Ok(LlmConfig {
+            api_key,
+            base_url: store::setting(&c, "NEUMOOC_LLM_BASE_URL")
+                .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
+            model: store::setting(&c, "NEUMOOC_LLM_MODEL")
+                .unwrap_or_else(|| "glm-4.5-flash".into()),
+        })
     }
 
     /// 取某账号签到时要带的**模拟设备 ID**，`None` = 不带该字段。
@@ -1824,15 +1850,7 @@ pub fn run_ai_answer(
     }
 
     // LLM 配置
-    let key = std::env::var("NEUMOOC_LLM_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        return Err(Error::Invalid(
-            "AI 未配置：需要设置 NEUMOOC_LLM_API_KEY 后重启后端".into(),
-        ));
-    }
-    let base = std::env::var("NEUMOOC_LLM_BASE_URL")
-        .unwrap_or_else(|_| "https://api.z.ai/api/paas/v4".into());
-    let model = std::env::var("NEUMOOC_LLM_MODEL").unwrap_or_else(|_| "glm-4.5-flash".into());
+    let cfg = ctx.llm_config()?;
 
     let mut answers: Vec<neumooc_core::homework::Answer> = Vec::new();
     let mut logs: Vec<Value> = Vec::new();
@@ -1850,7 +1868,7 @@ pub fn run_ai_answer(
             &q.question_type,
         );
 
-        let reply = match ask_llm(&base, &key, &model, &prompt) {
+        let reply = match ask_llm(&cfg.base_url, &cfg.api_key, &cfg.model, &prompt) {
             Ok(r) => r,
             Err(e) => {
                 logs.push(json!({ "level": "warn", "message": format!("第 {} 题取答案失败：{e}", q.question_no) }));
@@ -2124,15 +2142,7 @@ pub fn run_ai_answer_bulk(
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
-    let key = std::env::var("NEUMOOC_LLM_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        return Err(Error::Invalid(
-            "AI 未配置：需要设置 NEUMOOC_LLM_API_KEY 后重启后端".into(),
-        ));
-    }
-    let base = std::env::var("NEUMOOC_LLM_BASE_URL")
-        .unwrap_or_else(|_| "https://api.z.ai/api/paas/v4".into());
-    let model = std::env::var("NEUMOOC_LLM_MODEL").unwrap_or_else(|_| "glm-4.5-flash".into());
+    let cfg = ctx.llm_config()?;
 
     let mut c = ctx.client(account_id)?;
     token.check()?;
@@ -2167,7 +2177,7 @@ pub fn run_ai_answer_bulk(
     }
 
     let prompt = format!("{BULK_PROMPT}{}", serde_json::to_string_pretty(&packed).unwrap_or_default());
-    let reply = ask_llm(&base, &key, &model, &prompt)?;
+    let reply = ask_llm(&cfg.base_url, &cfg.api_key, &cfg.model, &prompt)?;
     let obj = extract_json_object(&reply).ok_or_else(|| {
         Error::Invalid(format!(
             "AI 回复不是 JSON：{}",

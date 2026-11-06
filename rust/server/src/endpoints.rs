@@ -1149,16 +1149,137 @@ pub async fn task_ai_answer(
 }
 
 /// `GET /api/llm/status` —— 只回状态，**绝不回密钥**。
-pub async fn llm_status(user: AuthUser) -> Result<Json<Value>, ApiError> {
+pub async fn llm_status(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
     user.require("user")?;
-    let key = std::env::var("NEUMOOC_LLM_API_KEY").unwrap_or_default();
+    let conn = st.conn();
+    let key = store::setting(&conn, "NEUMOOC_LLM_API_KEY").unwrap_or_default();
     Ok(Json(json!({
-        "available": !key.trim().is_empty(),
-        "model": std::env::var("NEUMOOC_LLM_MODEL")
-            .unwrap_or_else(|_| "glm-4.5-flash".into()),
-        "base_url": std::env::var("NEUMOOC_LLM_BASE_URL")
-            .unwrap_or_else(|_| "https://api.z.ai/api/paas/v4".into()),
+        "available": !key.is_empty(),
+        "model": store::setting(&conn, "NEUMOOC_LLM_MODEL")
+            .unwrap_or_else(|| "glm-4.5-flash".into()),
+        "base_url": store::setting(&conn, "NEUMOOC_LLM_BASE_URL")
+            .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
     })))
+}
+
+/// `GET /api/llm/config` —— 读完整配置（**key 打码**）。
+pub async fn llm_config_get(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    user.require("admin")?; // 配置里有 key 的存在性，只有管理员能看
+    let conn = st.conn();
+    let key = store::setting(&conn, "NEUMOOC_LLM_API_KEY").unwrap_or_default();
+    Ok(Json(json!({
+        // **绝不回明文 key** —— 只告诉前端"有没有配"和前 4 位便于辨认
+        "has_key": !key.is_empty(),
+        "key_hint": if key.len() > 8 {
+            format!("{}…{}", &key[..4], &key[key.len() - 4..])
+        } else { String::new() },
+        "model": store::setting(&conn, "NEUMOOC_LLM_MODEL")
+            .unwrap_or_else(|| "glm-4.5-flash".into()),
+        "base_url": store::setting(&conn, "NEUMOOC_LLM_BASE_URL")
+            .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
+        // 被环境变量压住时，界面改了也不生效 —— 要明确告诉用户
+        "key_from_env": store::setting_from_env("NEUMOOC_LLM_API_KEY"),
+        "model_from_env": store::setting_from_env("NEUMOOC_LLM_MODEL"),
+        "base_url_from_env": store::setting_from_env("NEUMOOC_LLM_BASE_URL"),
+    })))
+}
+
+/// `PUT /api/llm/config` —— 保存配置。`api_key` 留空 = **不修改**（保留原值）。
+#[derive(Deserialize)]
+pub struct LlmConfigIn {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// 传 true 显式清除已保存的 key
+    #[serde(default)]
+    pub clear_key: bool,
+}
+
+pub async fn llm_config_set(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<LlmConfigIn>,
+) -> Result<Json<Value>, ApiError> {
+    user.require("admin")?;
+    let conn = st.conn();
+    if body.clear_key {
+        store::set_setting(&conn, "NEUMOOC_LLM_API_KEY", "")
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    } else if let Some(k) = body.api_key.as_ref() {
+        // 空串 = 不改（前端回填的是打码值，不能拿它覆盖真 key）
+        if !k.trim().is_empty() {
+            store::set_setting(&conn, "NEUMOOC_LLM_API_KEY", k.trim())
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        }
+    }
+    if let Some(m) = body.model.as_ref() {
+        store::set_setting(&conn, "NEUMOOC_LLM_MODEL", m.trim())
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if let Some(b) = body.base_url.as_ref() {
+        store::set_setting(&conn, "NEUMOOC_LLM_BASE_URL", b.trim())
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/llm/test` —— 用当前配置发一次真实请求，验证 key/base/model 是否可用。
+pub async fn llm_test(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    user.require("admin")?;
+    let cfg = st
+        .tasks
+        .llm_config()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    // 真发一次最小请求 —— 只验连通性和鉴权，不在界面上假装"配置成功"
+    let out = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", cfg.api_key))
+            .json(&json!({
+                "model": cfg.model,
+                "messages": [{ "role": "user", "content": "只回复两个字：可用" }],
+                "temperature": 0,
+                "max_tokens": 16,
+            }))
+            .send()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("HTTP {status}：{}", text.chars().take(200).collect::<String>()));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|_| "响应不是 JSON".to_string())?;
+        Ok(v.get("choices").and_then(|a| a.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(format!("测试线程失败：{e}")))?;
+
+    match out {
+        Ok(s) => Ok(Json(json!({ "ok": true, "reply": s }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+    }
 }
 
 // ---------------------------------------------------------------- 最后几个
