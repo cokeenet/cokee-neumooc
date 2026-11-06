@@ -43,6 +43,8 @@ pub struct AppState {
     pub tasks: Arc<crate::tasks::TaskCtx>,
     /// 站点走 HTTPS 时置 true（决定 cookie 带不带 `Secure`）
     pub secure_cookie: bool,
+    /// 登录爆破防护（内存计数，见 `login_guard` 模块）
+    pub login_guard: Arc<crate::login_guard::LoginGuard>,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             workers: Arc::new(Mutex::new(WorkerRegistry::new())),
             tasks: Arc::new(crate::tasks::TaskCtx::new(db, cipher)),
             secure_cookie: false,
+            login_guard: Arc::new(crate::login_guard::LoginGuard::new()),
         })
     }
 
@@ -87,9 +90,44 @@ impl AuthUser {
 /// 统一的错误响应。
 pub struct ApiError(pub StatusCode, pub String);
 
+/// 429 的专属返回：消息 + `Retry-After` 头。
+///
+/// 单独一个类型是因为 `ApiError` 是 `(StatusCode, String)` 的 tuple struct，
+/// 加不了响应头。而 `Retry-After` 是标准头，比在消息里拼 `|899` 规矩得多
+/// —— 早先那么干，前端把 `|899` 直接显示给用户了。
+pub struct TooMany {
+    pub msg: String,
+    pub retry_secs: u64,
+}
+
+impl IntoResponse for TooMany {
+    fn into_response(self) -> Response {
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "detail": self.msg, "retry_after": self.retry_secs })),
+        )
+            .into_response();
+        if let Ok(v) = self.retry_secs.to_string().parse() {
+            resp.headers_mut().insert("retry-after", v);
+        }
+        resp
+    }
+}
+
 impl ApiError {
     pub fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "未登录".into())
+    }
+
+    /// 429 —— 请求过于频繁。
+    ///
+    /// 和 `bad_request` 分开是有意的：前端要能区分「密码错了」和
+    /// 「你先歇会」。混成 400 的话，用户会以为密码记错了，越试越锁。
+    ///
+    /// 剩余秒数走 `Retry-After` 头（标准做法），不塞进消息体 ——
+    /// 早先塞成 `msg|899`，前端直接把 `|899` 显示给用户了。
+    pub fn too_many(msg: impl Into<String>) -> Self {
+        Self(StatusCode::TOO_MANY_REQUESTS, msg.into())
     }
     pub fn forbidden(msg: &str) -> Self {
         Self(StatusCode::FORBIDDEN, msg.into())
@@ -219,6 +257,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(crate::endpoints::llm_config_get).put(crate::endpoints::llm_config_set),
         )
         .route("/api/llm/test", post(crate::endpoints::llm_test))
+        .route("/api/login-guard", get(crate::endpoints::login_guard_status))
         .route("/api/llm/ask", post(crate::endpoints::llm_ask))
         .route("/api/notify/test", post(crate::endpoints::notify_test))
         .route("/api/schedule/:id/run-now", post(crate::endpoints::run_now))
@@ -263,8 +302,30 @@ struct LoginIn {
 
 async fn login(
     State(st): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<LoginIn>,
 ) -> Result<Response, ApiError> {
+    // 真实客户端 IP —— 后端只监听回环，直连地址永远是 127.0.0.1，
+    // 拿它限流等于全体用户共用一个桶（见 `login_guard::client_ip` 的注释）
+    let ip = crate::login_guard::client_ip(&headers, "unknown");
+
+    // **先查锁再验密码** —— 爆破时连 Argon2 都不该算（它一次 150ms，是攻击者的免费算力）
+    if let Err(lock) = st.login_guard.check(&body.username, &ip) {
+        // 日志里**不写完整用户名**：这行可能反复出现，而 log 是长期留存的
+        log::warn!(
+            "登录被拒（{} 锁定中）：{} ip={} 剩余 {}s",
+            lock.scope,
+            crate::login_guard::mask(&body.username),
+            crate::login_guard::mask(&ip),
+            lock.secs
+        );
+        return Ok(TooMany {
+            msg: format!("尝试过于频繁，请 {} 分钟后再试", (lock.secs + 59) / 60),
+            retry_secs: lock.secs,
+        }
+        .into_response());
+    }
+
     let conn = st.conn();
     let row: Option<(String, String)> = conn
         .query_row(
@@ -275,11 +336,15 @@ async fn login(
         .ok();
     // 用户不存在与密码错误给**同一个**提示 —— 否则可以拿来枚举用户名
     let Some((hash, role)) = row else {
+        st.login_guard.fail(&body.username, &ip);
         return Err(ApiError::bad_request("用户名或密码错误"));
     };
     if !auth::verify_password(&body.password, &hash) {
+        st.login_guard.fail(&body.username, &ip);
         return Err(ApiError::bad_request("用户名或密码错误"));
     }
+    // 成功 → 清零计数（正常用户打错一两次不该被罚）
+    st.login_guard.ok(&body.username, &ip);
 
     let token = auth::new_token();
     let now = db::now_ms();
@@ -297,22 +362,27 @@ async fn login(
 
     let mut resp = Json(json!({ "ok": true, "username": body.username, "role": role }))
         .into_response();
+    // `Secure` 按请求实际协议决定（代理层是 HTTPS 就带）——
+    // 硬编码会漏掉 `Secure`，会话 cookie 明文也会发（见 `auth::want_secure_cookie`）
+    let secure = auth::want_secure_cookie(&headers);
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
-        auth::set_cookie(&token, auth::SESSION_TTL_SECS, st.secure_cookie)
+        auth::set_cookie(&token, auth::SESSION_TTL_SECS, secure)
             .parse()
             .expect("cookie 值合法"),
     );
     Ok(resp)
 }
 
-async fn logout(State(st): State<Arc<AppState>>) -> Response {
+async fn logout(State(st): State<Arc<AppState>>, headers: axum::http::HeaderMap) -> Response {
     // 即使没带 token 也返回 200 —— 登出失败不该把用户卡住。
     // 这里**不碰数据库**：只清 cookie 就够了，服务端会话靠过期自然清理。
     let mut resp = Json(json!({ "ok": true })).into_response();
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
-        auth::clear_cookie(st.secure_cookie).parse().expect("cookie 值合法"),
+        auth::clear_cookie(auth::want_secure_cookie(&headers))
+            .parse()
+            .expect("cookie 值合法"),
     );
     resp
 }
@@ -621,4 +691,96 @@ mod tests {
         let weird = AuthUser { username: "a".into(), role: "ADMIN".into() };
         assert!(weird.require("admin").is_err(), "拼错的角色不能提权");
     }
+    /// **回归护栏**：每个路由的处理函数必须声明 `AuthUser`。
+    ///
+    /// ## 为什么需要这个测试
+    ///
+    /// 本项目的鉴权**没有全局中间件**（`is_public` 只在测试里用），
+    /// 保护完全靠每个 handler 自己声明 `AuthUser` 参数 —— 声明了，
+    /// 未登录请求才会在提取阶段被拒（401）；没声明，那个接口就是**公开的**。
+    ///
+    /// 实际踩过：`GET /api/device-config` 漏了 `AuthUser`，
+    /// 于是无需登录就能读到设备 ID 伪造开关的说明（实测直接 200）。
+    ///
+    /// 这个测试直接扫源码，把「漏声明」变成构建期失败。
+    #[test]
+    fn every_route_handler_requires_auth() {
+        const API_SRC: &str = include_str!("api.rs");
+        const EPS_SRC: &str = include_str!("endpoints.rs");
+        const SSE_SRC: &str = include_str!("sse.rs");
+
+        // 公开路由：登录/登出/健康检查 —— 本来就该匿名可访问
+        const PUBLIC: &[&str] = &[
+            "/api/auth/login",
+            "/api/auth/logout",
+            "/api/health",
+        ];
+
+        // 从路由表里抽 (路径, 处理函数名)
+        let mut routes: Vec<(String, String)> = Vec::new();
+        for line in API_SRC.lines() {
+            let Some(i) = line.find(".route(") else { continue };
+            let rest = &line[i + 7..];
+            let Some(q1) = rest.find('"') else { continue };
+            let Some(q2) = rest[q1 + 1..].find('"') else { continue };
+            let path = &rest[q1 + 1..q1 + 1 + q2];
+            if !path.starts_with("/api/") || PUBLIC.contains(&path) {
+                continue;
+            }
+            // 处理函数：取 `(get|post|put|delete|patch)(xxx)` 里的 xxx
+            for kw in ["get(", "post(", "put(", "delete(", "patch("] {
+                if let Some(j) = rest.find(kw) {
+                    let after = &rest[j + kw.len()..];
+                    if let Some(k) = after.find(')') {
+                        let name = after[..k]
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !name.is_empty() {
+                            routes.push((path.to_string(), name));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!routes.is_empty(), "没解析出任何路由，正则/格式变了？");
+
+        let mut bad: Vec<String> = Vec::new();
+        for (path, fn_name) in &routes {
+            // 在 endpoints.rs / api.rs 里找该函数的签名（到第一个 `{` 之前）
+            let mut sig = None;
+            // 签名可能是 `pub async fn`（endpoints.rs）或 `async fn`（api.rs 内私有）
+            for src in [EPS_SRC, API_SRC, SSE_SRC] {
+                for pat in [
+                    format!("pub async fn {fn_name}"),
+                    format!("async fn {fn_name}"),
+                ] {
+                    if let Some(i) = src.find(&pat) {
+                        let end = src[i..].find('{').map(|k| i + k).unwrap_or(src.len());
+                        sig = Some(&src[i..end]);
+                        break;
+                    }
+                }
+                if sig.is_some() {
+                    break;
+                }
+            }
+            match sig {
+                None => bad.push(format!("{path} → {fn_name}（找不到函数）")),
+                Some(s) if !s.contains("AuthUser") => {
+                    bad.push(format!("{path} → {fn_name}（缺 AuthUser）"))
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            bad.is_empty(),
+            "以下路由的处理函数没声明 AuthUser，等于未授权可访问：\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
 }

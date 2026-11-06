@@ -72,6 +72,38 @@ pub fn token_from_cookie(header: &str) -> Option<String> {
     })
 }
 
+/// 该请求是不是走的 HTTPS —— 决定 Cookie 带不带 `Secure`。
+///
+/// ## 为什么不能硬编码
+///
+/// 后端只监听 `127.0.0.1:8788`，前面是 nginx（HTTPS 终止在那一层）。
+/// 从后端视角看连接永远是明文 HTTP —— **按连接判断会把所有请求都算成 HTTP**。
+///
+/// 实测过：`secure_cookie` 硬编码 `false`，于是 `Set-Cookie` 里没有 `Secure`。
+/// 站点对外是 HTTPS，但**同一个 cookie 明文 HTTP 也会发** ——
+/// 校园网这种共享链路里可以被嗅探后劫持会话。
+///
+/// ## 判断依据
+///
+/// nginx 配了 `proxy_set_header X-Forwarded-Proto $neu_real_proto`，
+/// 后端只监听回环、外部无法直连，所以这个头可信。
+///
+/// `NEUMOOC_SECURE_COOKIE` 可强制指定（反向代理没传 proto 头时用得上）。
+pub fn want_secure_cookie(headers: &axum::http::HeaderMap) -> bool {
+    if let Ok(v) = std::env::var("NEUMOOC_SECURE_COOKIE") {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "on" | "true" | "yes" => return true,
+            "0" | "off" | "false" | "no" => return false,
+            _ => {}
+        }
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
 /// 构造 `Set-Cookie`。
 ///
 /// `HttpOnly` 挡 XSS 读取；`SameSite=Lax` 挡跨站写请求（GET 导航仍带得上）；

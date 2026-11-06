@@ -396,7 +396,14 @@ pub async fn set_device_id(
 /// `GET /api/device-config` —— 模拟设备 ID 的**全局开关状态**。
 ///
 /// 前端据此显示开关是否生效（关掉时所有账号都不带 deviceId）。
-pub async fn device_config() -> Result<Json<Value>, ApiError> {
+pub async fn device_config(
+    // ⚠️ 这个 `AuthUser` 不是摆设 —— 本项目的鉴权**没有全局中间件**，
+    // 全靠每个 handler 自己声明 `AuthUser` 来触发 401。
+    // 早先这个函数没声明，导致 `GET /api/device-config` **完全无需登录**，
+    // 把设备 ID 伪造开关的说明直接给了任何能访问端口的人。
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    user.require("user")?;
     Ok(Json(json!({
         "master_on": crate::tasks::device_id_master_on(),
         "env_var": "NEUMOOC_DEVICE_ID",
@@ -1191,6 +1198,17 @@ pub async fn llm_status(
         "base_url": store::setting(&conn, "NEUMOOC_LLM_BASE_URL")
             .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
     })))
+}
+
+/// `GET /api/login-guard` —— 登录爆破防护的当前状态（仅 root）。
+///
+/// 只回**打码后**的用户名/IP —— 状态接口不该把完整标识打出去。
+pub async fn login_guard_status(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    user.require("root")?;
+    Ok(Json(st.login_guard.snapshot()))
 }
 
 /// `GET /api/llm/config` —— 读完整配置（**key 打码**）。
