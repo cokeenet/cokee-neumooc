@@ -2549,47 +2549,73 @@ pub async fn upload_file(
     })))
 }
 
-/// `GET /api/accounts/:id/tasks/:test_id/questions/:no/image` —— **题目里的图片**。
+/// `GET /api/accounts/:id/asset?src=<相对路径或 URL>` —— **带上 token 转发一个资源**。
 ///
-/// 题干/选项是富文本，图片是 `/content/s3/getObjectIO?eid=...` 相对路径。
-/// 前端 `<img src>` 直接指过来，这里带 token 取回字节转发。
+/// 用于题目里的图片（`/content/s3/getObjectIO?eid=...`）、以及任何需要
+/// `Authorization` 才能取的静态资源。
 ///
-/// `no` 传题目编号；`idx` 传第几张（默认 0）。
-pub async fn question_image(
+/// ## 为什么由前端传 `src`
+///
+/// 早先的写法是 `.../questions/:no/image?idx=N` —— 后端每次都要
+/// `enter_task(test_id)` 拿到试卷、再数题图。**一道题两张图就是两次 enter**，
+/// 而 `enter` 很重（还可能在 token 过期时触发重新登录）。
+///
+/// 实测症状：一张作业的两张图同时加载 → 两次并发重登互相踢掉 token →
+/// 第二张图 400。前端本来就有题干 HTML，直接从里面抽 src 更省事。
+///
+/// ## 安全
+///
+/// 只放行 `/content/` 开头的路径和 `http(s)` 绝对 URL —— 否则这个接口
+/// 就成了"用服务端 token 打任意内部地址"的代理。
+pub async fn proxy_asset(
     State(st): State<Arc<AppState>>,
     user: AuthUser,
-    Path((id, test_id, no)): Path<(i64, String, String)>,
+    Path(id): Path<i64>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, ApiError> {
     own(&st.conn(), &user, id)?;
-    let want = q.get("idx").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let src = q.get("src").cloned().unwrap_or_default();
+    if src.is_empty() {
+        return Err(ApiError::bad_request("缺少 src"));
+    }
+    let ok = src.starts_with("/content/")
+        || src.starts_with("https://")
+        || src.starts_with("http://");
+    if !ok {
+        return Err(ApiError::bad_request("只允许 /content/ 开头的路径或 http(s) URL"));
+    }
+
     let ctx = st.tasks.clone();
     let out = tokio::task::spawn_blocking(move || -> neumooc_core::Result<Vec<u8>> {
-        let mut c = ctx.client(id)?;
-        let e = c.enter_task(&test_id)?;
-        let qs = e.paper.questions();
-        let qq = qs
-            .iter()
-            .find(|x| x.question_no == no)
-            .ok_or_else(|| neumooc_core::Error::Invalid(format!("没有第 {no} 题")))?;
-        let srcs = neumooc_core::homework::extract_img_srcs(qq);
-        let src = srcs
-            .get(want)
-            .ok_or_else(|| neumooc_core::Error::Invalid(format!("第 {no} 题没有第 {want} 张图")))?;
-        c.fetch_bytes(src)
+        let c = ctx.client(id)?;
+        c.fetch_bytes(&src)
     })
     .await
-    .map_err(|e| ApiError::bad_request(format!("取图线程失败：{e}")))?
+    .map_err(|e| ApiError::bad_request(format!("取资源线程失败：{e}")))?
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    // 按魔数判类型
-    let mime = if out.starts_with(&[0x89, b'P', b'N', b'G']) { "image/png" }
-        else if out.starts_with(&[0xFF, 0xD8, 0xFF]) { "image/jpeg" }
-        else if out.starts_with(b"GIF8") { "image/gif" }
-        else if out.len() > 12 && &out[0..4] == b"RIFF" && &out[8..12] == b"WEBP" { "image/webp" }
-        else { "application/octet-stream" };
+    let mime = mime_of_bytes(&out);
     axum::response::Response::builder()
         .header("content-type", mime)
+        // 图片不会变，让浏览器缓存 —— 翻来翻去不该重复打后端
+        .header("cache-control", "private, max-age=3600")
         .body(axum::body::Body::from(out))
         .map_err(|e| ApiError::bad_request(format!("构造响应失败：{e}")))
+}
+
+/// 按魔数判 MIME（不信 Content-Type —— 平台可能回 JSON 错误）。
+fn mime_of_bytes(b: &[u8]) -> &'static str {
+    if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if b.starts_with(b"GIF8") {
+        "image/gif"
+    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        "image/webp"
+    } else if b.first() == Some(&b'{') {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    }
 }

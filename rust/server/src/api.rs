@@ -212,10 +212,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // 附件 / 文件题
         .route("/api/accounts/:id/files", post(crate::endpoints::upload_file))
         .route("/api/accounts/:id/files/:eid", get(crate::endpoints::download_file))
-        .route(
-            "/api/accounts/:id/tasks/:test_id/questions/:no/image",
-            get(crate::endpoints::question_image),
-        )
+        .route("/api/accounts/:id/asset", get(crate::endpoints::proxy_asset))
         .route("/api/llm/status", get(crate::endpoints::llm_status))
         .route(
             "/api/llm/config",

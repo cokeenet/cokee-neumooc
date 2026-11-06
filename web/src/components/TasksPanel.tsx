@@ -27,6 +27,7 @@ import { fmtDeadline, fmtTs } from '../lib/labels';
 import EmptyState from 'korikura-webui/components/ui/EmptyState';
 import ErrorState from 'korikura-webui/components/ui/ErrorState';
 import { InlineConfirm } from 'korikura-webui/components/InlineDialog';
+import ImagePreview from './ImagePreview';
 
 interface LlmStatus {
   available: boolean;
@@ -130,37 +131,61 @@ function FileAnswer({ accountId, onUploaded }: {
   );
 }
 
-function QuestionImages({ accountId, testId, no, stem }: {
+function QuestionImages({ accountId, stem }: {
   accountId: number;
-  testId: string;
-  no: string;
   stem: string;
 }) {
-  // 数题干里的 <img（选项里的图后端也会收进去，idx 顺序一致）
-  const count = (stem.match(/<img/gi) ?? []).length;
+  // 从题干/选项的富文本里抽 <img src>。平台给的是相对路径
+  // （`/content/s3/getObjectIO?eid=...`），要经后端代理才能带 token 取到。
+  const srcs = useMemo(() => extractImgSrcs(stem), [stem]);
   const [failed, setFailed] = useState<Set<number>>(new Set());
-  if (count === 0) return null;
+  /** 预览第几张（null = 不显示） */
+  const [preview, setPreview] = useState<number | null>(null);
+  if (srcs.length === 0) return null;
+
+  const ok = srcs.map((_, i) => i).filter((i) => !failed.has(i));
 
   return (
-    <div className="row" style={{ gap: 8, flexWrap: 'wrap', margin: '8px 0' }}>
-      {Array.from({ length: count }, (_, i) => i)
-        .filter((i) => !failed.has(i))
-        .map((i) => (
-          <a key={i} href={api.questionImageUrl(accountId, testId, no, i)}
-            target="_blank" rel="noreferrer" title="点击看原图">
-            <img
-              src={api.questionImageUrl(accountId, testId, no, i)}
-              alt={`第 ${no} 题图 ${i + 1}`}
-              style={{
-                maxWidth: 320, maxHeight: 220, borderRadius: 6,
-                border: '1px solid var(--border)', objectFit: 'contain',
-              }}
-              onError={() => setFailed((prev) => new Set(prev).add(i))}
-            />
-          </a>
+    <>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap', margin: '8px 0' }}>
+        {ok.map((i) => (
+          <img
+            key={i}
+            src={api.assetUrl(accountId, srcs[i])}
+            alt={`题图 ${i + 1}`}
+            title="点击看大图"
+            onClick={() => setPreview(i)}
+            style={{
+              maxWidth: 320, maxHeight: 220, borderRadius: 6,
+              border: '1px solid var(--border)', objectFit: 'contain',
+              cursor: 'zoom-in',
+            }}
+            onError={() => setFailed((prev) => new Set(prev).add(i))}
+          />
         ))}
-    </div>
+      </div>
+      {preview !== null && (
+        <ImagePreview
+          images={ok.map((i) => ({ src: api.assetUrl(accountId, srcs[i]), alt: `题图 ${i + 1}` }))}
+          index={Math.max(0, ok.indexOf(preview))}
+          onClose={() => setPreview(null)}
+          onIndexChange={(pos) => setPreview(ok[pos] ?? null)}
+        />
+      )}
+    </>
   );
+}
+
+/** 从富文本里抽 `<img src="...">` 的地址（与后端 `extract_img_srcs` 同规则）。 */
+function extractImgSrcs(html: string): string[] {
+  const out: string[] = [];
+  const re = /<img[^>]*\ssrc=["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const u = m[1].trim();
+    if (u && !out.includes(u)) out.push(u);
+  }
+  return out;
 }
 
 function QuestionCard({
@@ -213,7 +238,7 @@ function QuestionCard({
       <p className="exam-q-stem">{q.stemText || stripTags(q.stem)}</p>
 
       {/* 题目图片：富文本里的 <img> 拿不到（没 token），走后端转发 */}
-      <QuestionImages accountId={accountId} testId={testId} no={q.questionNo} stem={q.stem} />
+      <QuestionImages accountId={accountId} stem={q.stem} />
 
       {/* 任务附件（老师给的指导书）—— 带 eid 才能下载 */}
       {q.taskEid && (

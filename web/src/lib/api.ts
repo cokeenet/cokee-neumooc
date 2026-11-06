@@ -134,9 +134,15 @@ export const api = {
 
   /** 附件下载地址（直接给 `<a href>` 用，后端带上 token 转发） */
   fileUrl: (id: number, eid: string) => `/api/accounts/${id}/files/${encodeURIComponent(eid)}`,
-  /** 题目图片地址（`idx` = 该题的第几张图） */
-  questionImageUrl: (id: number, testId: string, no: string, idx = 0) =>
-    `/api/accounts/${id}/tasks/${testId}/questions/${encodeURIComponent(no)}/image?idx=${idx}`,
+  /**
+   * 资源代理地址（题图、附件预览等需要 token 的静态资源）。
+   *
+   * 早先是 `/tasks/:test_id/questions/:no/image?idx=N` —— 后端每张图都要
+   * `enter_task` 一次，两道图并发就会触发两次重新登录互相踢 token（第二张 400）。
+   * 现在前端直接把题干里抽到的 src 传过来，后端只负责带 token 转发。
+   */
+  assetUrl: (id: number, src: string) =>
+    `/api/accounts/${id}/asset?src=${encodeURIComponent(src)}`,
   /**
    * **上传文件**（附件 / 文件题作答）。返回平台 eid。
    *
