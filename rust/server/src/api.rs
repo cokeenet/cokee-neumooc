@@ -473,7 +473,7 @@ async fn get_auto_sign(
     Ok(Json(json!({
         "enabled": on,
         "available": master,
-        "interval_seconds": crate::scheduler::ATTENDANCE_TICK_SECS,
+        "interval_seconds": crate::scheduler::attendance_tick_secs(),
         "hint": if !master {
             "平台已全局关闭自动签到（NEUMOOC_AUTO_SIGN=0）—— 单账号开关无效".to_string()
         } else if on {

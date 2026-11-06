@@ -30,7 +30,31 @@ use crate::notify::Notifier;
 use crate::store;
 
 /// 考勤监控轮询间隔（秒）。
-pub const ATTENDANCE_TICK_SECS: u64 = 60;
+///
+/// ## 为什么默认改成 180 而不是 60
+///
+/// 平台侧的考勤场次通常**持续 10 分钟**（`openTime` → `finishTime`），
+/// 60 秒轮询等于一场考勤要查 10 次。10 个账号就是 **每分钟 10 次请求**、
+/// 每天 14400 次 —— 这个量级极易被平台判定为爬虫。
+///
+/// 实际后果：学校封了我们的出口 IP（平台所在网段整段不通，
+/// 从 VPS 访问正常），整个平台都用不了了。
+///
+/// 180 秒 = 10 分钟内仍能覆盖到，但请求量降到 1/3（每天 4800 次）。
+/// 可用 `NEUMOOC_ATTENDANCE_TICK` 环境变量覆盖。
+pub const ATTENDANCE_TICK_SECS: u64 = 180;
+
+/// 从环境变量取轮询间隔（秒），范围夹在 [60, 1800]。
+///
+/// 下限 60 是安全的（再快没有收益，一场考勤已经能覆盖 10 次）；
+/// 上限 1800 防止配错成"一天只查一次"。
+pub fn attendance_tick_secs() -> u64 {
+    std::env::var("NEUMOOC_ATTENDANCE_TICK")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(60, 1800))
+        .unwrap_or(ATTENDANCE_TICK_SECS)
+}
 /// 调度器轮询间隔（秒）。
 pub const SCHEDULER_TICK_SECS: u64 = 30;
 

@@ -31,6 +31,43 @@ pub struct Client {
 }
 
 impl Client {
+    /// **主动限速**：两个请求之间至少间隔 `MIN_GAP_MS`。
+    ///
+    /// ## 为什么需要
+    ///
+    /// 学校平台对我们的出口 IP 做了封禁（平台所在网段整段不通，
+    /// 而从 VPS 访问正常）—— 起因大概率是请求过密：
+    /// 10 个账号 × 每分钟一次考勤查询 = 每天 14400 次，这个量级像爬虫。
+    ///
+    /// 限速是**最后一道保险**：即使上层调度配错了间隔，
+    /// 也不会瞬间打出一堆请求。代价是批量操作会慢一点，值得。
+    ///
+    /// 用全局静态锁而不是实例字段 —— 多个账号的 client 是各自创建的，
+    /// 按实例限速等于没限（10 个实例各打各的）。
+    /// 可用 `NEUMOOC_MIN_GAP_MS` 调整，`0` 关闭。
+    fn throttle() {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+
+        static LAST: OnceLock<Mutex<Instant>> = OnceLock::new();
+        let min_gap_ms: u64 = std::env::var("NEUMOOC_MIN_GAP_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(200); // 默认 200ms → 每秒最多 5 个请求
+        if min_gap_ms == 0 {
+            return;
+        }
+        let lock = LAST.get_or_init(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
+        if let Ok(mut last) = lock.lock() {
+            let gap = Duration::from_millis(min_gap_ms);
+            let elapsed = last.elapsed();
+            if elapsed < gap {
+                std::thread::sleep(gap - elapsed);
+            }
+            *last = Instant::now();
+        }
+    }
+
     pub fn new(base: impl Into<String>, tenant_id: impl Into<String>) -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
@@ -79,6 +116,7 @@ impl Client {
         if !self.tenant_id.is_empty() {
             req = req.header("Tenant-Id", &self.tenant_id);
         }
+        Self::throttle();
         let resp = req.send()?;
         if !resp.status().is_success() {
             return Err(Error::Biz {
@@ -186,6 +224,7 @@ impl Client {
             req = req.json(b);
         }
 
+        Self::throttle();
         let resp = req.send()?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
@@ -268,6 +307,7 @@ impl Client {
         if !params.is_empty() {
             req = req.query(params);
         }
+        Self::throttle();
         let resp = req.send()?;
         let status = resp.status();
         if !status.is_success() {
@@ -300,6 +340,7 @@ impl Client {
         // 明明 form 里带了 source。去掉手动头之后立刻成功。
         // `json_ct=false`：不设 Content-Type，交给 `.multipart()` 写带 boundary 的
         let req = self.prepare_ex("POST", path, false)?.multipart(form);
+        Self::throttle();
         let resp = req.send()?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();

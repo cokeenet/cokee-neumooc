@@ -251,12 +251,32 @@ fn spawn_background(state: Arc<api::AppState>) {
                         let _ = watcher.tick(&conn);
                     }
 
-                    std::thread::sleep(std::time::Duration::from_secs(
-                        neumooc_server::scheduler::ATTENDANCE_TICK_SECS,
-                    ));
+                    // **加随机抖动**（±20%）：固定节拍（每分钟 :00 整）本身
+                    // 就是机器特征 —— 人不会这么准。抖动后请求时刻分散开。
+                    let base = neumooc_server::scheduler::attendance_tick_secs();
+                    let jitter = (base as f64 * 0.2 * (rand_jitter() - 0.5)) as i64;
+                    let wait = (base as i64 + jitter).max(30) as u64;
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
                 }
             })
             .expect("起考勤监控线程失败");
     }
     println!("[neumooc] 调度器与考勤监控已启动");
+}
+
+/// 返回 [0,1) 的伪随机数（不需要密码学强度，只要够散）。
+///
+/// 用纳秒时间戳的低位 —— 每轮调用间隔几秒，低位足够随机。
+/// 不引入 `rand` crate 是为了不给这个纯定时用途增加依赖。
+fn rand_jitter() -> f64 {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // xorshift 再打散一次
+    let mut x = n as u64 | 1;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    (x % 1_000_000) as f64 / 1_000_000.0
 }
