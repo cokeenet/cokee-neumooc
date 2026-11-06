@@ -131,6 +131,27 @@ export const api = {
    * 结果 `answered` 永远是 undefined。
    */
   execution: (id: number) => req<Execution>(`/executions/${id}`),
+
+  /** 附件下载地址（直接给 `<a href>` 用，后端带上 token 转发） */
+  fileUrl: (id: number, eid: string) => `/api/accounts/${id}/files/${encodeURIComponent(eid)}`,
+  /** 题目图片地址（`idx` = 该题的第几张图） */
+  questionImageUrl: (id: number, testId: string, no: string, idx = 0) =>
+    `/api/accounts/${id}/tasks/${testId}/questions/${encodeURIComponent(no)}/image?idx=${idx}`,
+  /**
+   * **上传文件**（附件 / 文件题作答）。返回平台 eid。
+   *
+   * ⚠️ 不要手写 `Content-Type` —— 浏览器要给 FormData 自己带 boundary。
+   */
+  uploadFile: async (id: number, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch(`/api/accounts/${id}/files`, { method: 'POST', body: fd });
+    const d = await r.json() as {
+      ok?: boolean; eid?: string; name?: string; size?: string; md5?: string; detail?: string;
+    };
+    if (!r.ok || !d.ok) throw new Error(d.detail || '上传失败');
+    return d as { eid: string; name: string; size: string; md5: string };
+  },
   logs: (id: number) => req<LogRow[]>(`/executions/${id}/logs`),
   cancel: (id: number) => req<{ ok: boolean }>(`/executions/${id}/cancel`, { method: 'POST' }),
   terms: (id: number) =>
@@ -547,8 +568,14 @@ export interface HomeworkDetailQuestion {
   candidateScore: number | null;
   /** 我的答案（选择题是选项 id，多选用逗号连接；文件题是文字说明） */
   myAnswerText: string;
-  /** 文件题的附件名（平台不给下载直链） */
-  attachments: string[];
+  /** 我的作答附件（带 eid，可下载） */
+  attachments: { name: string; eid: string }[];
+  /** 任务附件（老师给的指导书）的 eid 与文件名 */
+  taskEid: string;
+  taskResName: string;
+  /** 我的作答附件的 eid（文件题交卷后才有） */
+  answerEid: string;
+  answerResName: string;
   standardAnswer: unknown;
   analysis: string;
   choices: { choiceId: string; choiceContent: string }[];

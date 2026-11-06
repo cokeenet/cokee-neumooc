@@ -14,7 +14,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Web 层
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
 async-trait = "0.1"
 # SSE：把「轮询数据库」写成一个流
 async-stream = "0.3"
@@ -43,6 +43,7 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hmac = "0.12"
 base64 = "0.22"
+urlencoding = "2"
 subtle = "2"
 
 [dev-dependencies]

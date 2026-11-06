@@ -60,20 +60,128 @@ function answerIds(a: string | null | undefined): string[] {
 }
 
 /** 一道题（含已交时的「我的答案」与得分）。 */
+/**
+ * 题目里的图片。
+ *
+ * ## 为什么要探测张数
+ *
+ * 平台不告诉我们一道题有几张图 —— 得自己从题干 HTML 里数 `<img`。
+ * 数出来之后按 idx 逐个走后端转发（图片要 `Authorization`，
+ * 前端 `<img>` 直接指原地址会 401）。
+ *
+ * `onError` 时把那张图从列表里摘掉：某张取不到不该让整题报错。
+ */
+/**
+ * 文件上传题（`type=40`）的作答控件。
+ *
+ * 这类题平台要的是**附件**，不是文字 —— AI 代答帮不上，只能手动传。
+ * 上传后拿到 `eid`，交给父组件存进 `draft`（提交时作为 `answerEid`）。
+ *
+ * ## 为什么不能直接传文件给平台
+ *
+ * 上传接口要 `Authorization` + `Id-Code`，而且 CORS 也不让浏览器直连。
+ * 所以走后端 `/api/accounts/:id/files` 转发。
+ */
+function FileAnswer({ accountId, onUploaded }: {
+  accountId: number;
+  onUploaded: (eid: string, name: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<{ name: string; size: string } | null>(null);
+  const [err, setErr] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const pick = async (file: File) => {
+    setBusy(true); setErr('');
+    try {
+      const r = await api.uploadFile(accountId, file);
+      setDone({ name: r.name || file.name, size: r.size });
+      onUploaded(r.eid, r.name || file.name);
+    } catch (e) {
+      setErr((e as Error).message || '上传失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="field" style={{ marginTop: 8 }}>
+      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <button className="btn btn-sm" disabled={busy} onClick={() => inputRef.current?.click()}>
+          {busy ? '上传中…' : '上传附件'}
+        </button>
+        <span className="muted small">可上传 5 个附件，单个不超过 300MB</span>
+      </div>
+      <input ref={inputRef} type="file" style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void pick(f);
+          e.target.value = ''; // 允许重选同一个文件
+        }} />
+      {done && (
+        <p className="msg-bar msg-ok small" style={{ marginTop: 6 }}>
+          已上传：{done.name}
+          {done.size && `（${(Number(done.size) / 1024).toFixed(0)} KB）`}
+          {' '}—— 记得点「保存草稿」或「交卷」
+        </p>
+      )}
+      {err && <p className="msg-bar msg-err small" style={{ marginTop: 6 }}>{err}</p>}
+    </div>
+  );
+}
+
+function QuestionImages({ accountId, testId, no, stem }: {
+  accountId: number;
+  testId: string;
+  no: string;
+  stem: string;
+}) {
+  // 数题干里的 <img（选项里的图后端也会收进去，idx 顺序一致）
+  const count = (stem.match(/<img/gi) ?? []).length;
+  const [failed, setFailed] = useState<Set<number>>(new Set());
+  if (count === 0) return null;
+
+  return (
+    <div className="row" style={{ gap: 8, flexWrap: 'wrap', margin: '8px 0' }}>
+      {Array.from({ length: count }, (_, i) => i)
+        .filter((i) => !failed.has(i))
+        .map((i) => (
+          <a key={i} href={api.questionImageUrl(accountId, testId, no, i)}
+            target="_blank" rel="noreferrer" title="点击看原图">
+            <img
+              src={api.questionImageUrl(accountId, testId, no, i)}
+              alt={`第 ${no} 题图 ${i + 1}`}
+              style={{
+                maxWidth: 320, maxHeight: 220, borderRadius: 6,
+                border: '1px solid var(--border)', objectFit: 'contain',
+              }}
+              onError={() => setFailed((prev) => new Set(prev).add(i))}
+            />
+          </a>
+        ))}
+    </div>
+  );
+}
+
 function QuestionCard({
-  q, canShowScore, canShowAnswer, editable, picked, onPick, text, onText,
+  q, canShowScore, canShowAnswer, editable, picked, onPick, text, onText, accountId, testId, onFile,
 }: {
   q: HomeworkDetailQuestion;
   canShowScore: boolean;
   canShowAnswer: boolean;
   /** 作答模式：可以点选/输入 */
   editable?: boolean;
+  /** 下载附件、取题目图要用 */
+  accountId: number;
+  testId: string;
   /** 已选的 choiceId 集合 */
   picked?: Set<string>;
   onPick?: (choiceId: string) => void;
   /** 填空/主观题的文本答案 */
   text?: string;
   onText?: (v: string) => void;
+  /** 文件题上传成功后回调（eid + 文件名） */
+  onFile?: (questionNo: string, eid: string, name: string) => void;
 }) {
   const mineIds = new Set((q.myAnswerText || '').split(',').map((x) => x.trim()).filter(Boolean));
   const rightRaw = q.standardAnswer;
@@ -103,6 +211,20 @@ function QuestionCard({
         </span>
       </div>
       <p className="exam-q-stem">{q.stemText || stripTags(q.stem)}</p>
+
+      {/* 题目图片：富文本里的 <img> 拿不到（没 token），走后端转发 */}
+      <QuestionImages accountId={accountId} testId={testId} no={q.questionNo} stem={q.stem} />
+
+      {/* 任务附件（老师给的指导书）—— 带 eid 才能下载 */}
+      {q.taskEid && (
+        <p className="exam-answer" style={{ marginTop: 6 }}>
+          <span className="muted">任务附件：</span>
+          <a className="link" href={api.fileUrl(accountId, q.taskEid)} download
+            title="点击下载">
+            {q.taskResName || '下载附件'}
+          </a>
+        </p>
+      )}
 
       {isChoice ? (
         <ul className="exam-choices">
@@ -148,11 +270,26 @@ function QuestionCard({
 
       {(q.attachments?.length ?? 0) > 0 && (
         <p className="exam-answer">
-          <span className="muted">附件：</span>
+          <span className="muted">我的附件：</span>
           {q.attachments.map((f) => (
-            <span key={f} className="badge badge-muted" style={{ marginRight: 6 }}>{f}</span>
+            f.eid ? (
+              <a key={f.eid} className="badge badge-run" style={{ marginRight: 6 }}
+                href={api.fileUrl(accountId, f.eid)} download title="点击下载">
+                {f.name}
+              </a>
+            ) : (
+              <span key={f.name} className="badge badge-muted" style={{ marginRight: 6 }}>{f.name}</span>
+            )
           ))}
         </p>
+      )}
+
+      {/* 文件上传题（type=40）：作业要求交附件，AI 答不了，只能手动传 */}
+      {editable && q.questionType === '40' && (
+        <FileAnswer
+          accountId={accountId}
+          onUploaded={(eid, name) => onFile?.(q.questionNo, eid, name)}
+        />
       )}
 
       {canShowAnswer && (
@@ -171,18 +308,23 @@ function QuestionCard({
 
 /** 右栏：一份作业（未交＝题目预览，已交＝我的答案与得分）。 */
 function PaperView({
-  detail, loading, error, onRetry, answering, draft, onPick, onText,
+  detail, loading, error, onRetry, answering, draft, onPick, onText, onFile, accountId, testId,
 }: {
   detail: HomeworkDetail | null;
   loading: boolean;
   error: string;
   onRetry: () => void;
+  /** 下载附件/取图/上传要用 */
+  accountId: number;
+  testId: string;
   /** 作答模式（点「开始作答」后为 true） */
   answering?: boolean;
   /** 题号 → 答案（选择题存 choiceId 逗号串；填空存文本） */
   draft?: Map<string, string>;
   onPick?: (questionNo: string, choiceId: string) => void;
   onText?: (questionNo: string, v: string) => void;
+  /** 文件题上传完成（eid 存进 draft，提交时作 answerEid） */
+  onFile?: (questionNo: string, eid: string, name: string) => void;
 }) {
   if (loading) return <p className="muted">正在拉取作业详情…</p>;
   if (error) {
@@ -260,10 +402,13 @@ function PaperView({
                 canShowScore={detail.can_show_score}
                 canShowAnswer={detail.can_show_answer}
                 editable={answering}
+                accountId={accountId}
+                testId={testId}
                 picked={new Set(cur.split(',').map((x) => x.trim()).filter(Boolean))}
                 onPick={(cid) => onPick?.(q.questionNo, cid)}
                 text={cur}
                 onText={(v) => onText?.(q.questionNo, v)}
+                onFile={onFile}
               />
             );
           })}
@@ -327,6 +472,17 @@ export default function TasksPanel({ accountId }: Props) {
 
   const onText = useCallback((qNo: string, v: string) => {
     setDraft((prev) => new Map(prev).set(qNo, v));
+  }, []);
+
+  /**
+   * 文件题上传完成。
+   *
+   * draft 里存成 `file:<eid>|<name>` —— 提交时要拆出来放进 `answer` 的
+   * 附件字段（`{stuAnswer:"", attachmentList:[{eid,filename}]}`），
+   * 不是普通文本答案。
+   */
+  const onFile = useCallback((qNo: string, eid: string, name: string) => {
+    setDraft((prev) => new Map(prev).set(qNo, `file:${eid}|${name}`));
   }, []);
 
   const answerAction = useAction(
@@ -680,6 +836,9 @@ export default function TasksPanel({ accountId }: Props) {
             draft={draft}
             onPick={onPick}
             onText={onText}
+            onFile={onFile}
+            accountId={accountId}
+            testId={openId ?? ''}
           />
         </div>
       </div>

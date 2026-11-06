@@ -1036,11 +1036,29 @@ pub async fn task_answer(
                 skipped.push(no);
                 continue;
             };
+            // 前端把文件题的上传结果存成 `file:<eid>|<name>`。
+            // 平台要的是**对象**（不是字符串）：
+            //   {"stuAnswer":"","attachmentList":[{"eid":"...","filename":"..."}]}
+            // 普通题照旧传字符串。
+            let raw = a.get("answer").and_then(Value::as_str).unwrap_or("");
+            let ans: Value = if let Some(rest) = raw.strip_prefix("file:") {
+                let (eid, name) = rest.split_once('|').unwrap_or((rest, ""));
+                json!({
+                    "stuAnswer": "",
+                    "attachmentList": [{
+                        "eid": eid,
+                        "filename": name,
+                        // 平台按 filename 生成预览，eid 决定取哪个文件
+                    }]
+                })
+            } else {
+                json!(raw)
+            };
             out.push(neumooc_core::homework::Answer {
                 paper_id: q.id.clone(),
                 question_no: q.question_no.clone(),
                 question_type: q.question_type.clone(),
-                answer: a.get("answer").and_then(Value::as_str).unwrap_or("").to_string(),
+                answer: ans,
             });
         }
         if dry {
@@ -2427,4 +2445,151 @@ pub fn new_uuid_v4() -> String {
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
         b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
     )
+}
+
+// ───────────────────── 附件 / 文件题 ─────────────────────
+
+/// `GET /api/accounts/:id/files/:eid` —— **下载附件**（任务附件、我的作答附件）。
+///
+/// 直接返回二进制流，前端用 `<a download>` 或 fetch+blob 存。
+///
+/// ## 为什么要走后端
+///
+/// 平台的下载接口**要 `Authorization`**，浏览器直接开链接会 401/拿不到。
+/// 而且它在路径写错时**不报 404**，而是回一段 45 字节的 JSON 错误（HTTP 200）——
+/// 那样的"文件"存下来是坏的，所以这里也要把错误外壳变成真错误。
+pub async fn download_file(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((id, eid)): Path<(i64, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    own(&st.conn(), &user, id)?;
+    let ctx = st.tasks.clone();
+    let eid2 = eid.clone();
+    let (bytes, name) = tokio::task::spawn_blocking(move || -> neumooc_core::Result<(Vec<u8>, String)> {
+        let c = ctx.client(id)?;
+        let meta = c.file_meta(&eid2).unwrap_or(Value::Null);
+        let name = meta
+            .get("objectKey")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{eid2}.bin"));
+        let b = c.file_download(&eid2)?;
+        Ok((b, name))
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(format!("下载线程失败：{e}")))?
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // 文件名要编码 —— 中文名直接塞头里会被 HTTP 规则切断
+    let encoded = urlencoding::encode(&name).to_string();
+    axum::response::Response::builder()
+        .header("content-type", "application/octet-stream")
+        .header(
+            "content-disposition",
+            format!("attachment; filename*=UTF-8''{encoded}"),
+        )
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::bad_request(format!("构造响应失败：{e}")))
+}
+
+/// `POST /api/accounts/:id/files` —— **上传文件**（multipart，字段名 `file`）。
+///
+/// 返回平台给的 `eid`，后续把它填进题目的 `answerEid` 就能当作业附件。
+pub async fn upload_file(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<Value>, ApiError> {
+    own(&st.conn(), &user, id)?;
+
+    let mut got: Option<(String, Vec<u8>)> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        // 只认名为 `file` 的字段（与网页端一致）
+        if field.name() != Some("file") && field.name() != Some("files") {
+            continue;
+        }
+        let name = field.file_name().unwrap_or("upload.bin").to_string();
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("读上传内容失败：{e}")))?;
+        got = Some((name, data.to_vec()));
+        break;
+    }
+    let Some((name, data)) = got else {
+        return Err(ApiError::bad_request("没有收到文件（字段名应为 file）"));
+    };
+    if data.is_empty() {
+        return Err(ApiError::bad_request("文件是空的"));
+    }
+    if data.len() > 300 * 1024 * 1024 {
+        return Err(ApiError::bad_request("文件超过 300MB"));
+    }
+
+    let ctx = st.tasks.clone();
+    let mime = neumooc_core::file::mime_of(&name).to_string();
+    let name_for_upload = name.clone();
+    let out = tokio::task::spawn_blocking(move || -> neumooc_core::Result<Value> {
+        let c = ctx.client(id)?;
+        c.file_put_object(&name_for_upload, data, &mime)
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(format!("上传线程失败：{e}")))?
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "eid": out.get("eid").and_then(Value::as_str).unwrap_or(""),
+        "name": out.get("objectKey").and_then(Value::as_str).unwrap_or(&name),
+        "size": out.get("fileSize").and_then(Value::as_str).unwrap_or(""),
+        "md5": out.get("fileMd5").and_then(Value::as_str).unwrap_or(""),
+        "raw": out,
+    })))
+}
+
+/// `GET /api/accounts/:id/tasks/:test_id/questions/:no/image` —— **题目里的图片**。
+///
+/// 题干/选项是富文本，图片是 `/content/s3/getObjectIO?eid=...` 相对路径。
+/// 前端 `<img src>` 直接指过来，这里带 token 取回字节转发。
+///
+/// `no` 传题目编号；`idx` 传第几张（默认 0）。
+pub async fn question_image(
+    State(st): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((id, test_id, no)): Path<(i64, String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
+    own(&st.conn(), &user, id)?;
+    let want = q.get("idx").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let ctx = st.tasks.clone();
+    let out = tokio::task::spawn_blocking(move || -> neumooc_core::Result<Vec<u8>> {
+        let mut c = ctx.client(id)?;
+        let e = c.enter_task(&test_id)?;
+        let qs = e.paper.questions();
+        let qq = qs
+            .iter()
+            .find(|x| x.question_no == no)
+            .ok_or_else(|| neumooc_core::Error::Invalid(format!("没有第 {no} 题")))?;
+        let srcs = neumooc_core::homework::extract_img_srcs(qq);
+        let src = srcs
+            .get(want)
+            .ok_or_else(|| neumooc_core::Error::Invalid(format!("第 {no} 题没有第 {want} 张图")))?;
+        c.fetch_bytes(src)
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(format!("取图线程失败：{e}")))?
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // 按魔数判类型
+    let mime = if out.starts_with(&[0x89, b'P', b'N', b'G']) { "image/png" }
+        else if out.starts_with(&[0xFF, 0xD8, 0xFF]) { "image/jpeg" }
+        else if out.starts_with(b"GIF8") { "image/gif" }
+        else if out.len() > 12 && &out[0..4] == b"RIFF" && &out[8..12] == b"WEBP" { "image/webp" }
+        else { "application/octet-stream" };
+    axum::response::Response::builder()
+        .header("content-type", mime)
+        .body(axum::body::Body::from(out))
+        .map_err(|e| ApiError::bad_request(format!("构造响应失败：{e}")))
 }

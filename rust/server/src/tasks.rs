@@ -1596,6 +1596,10 @@ pub fn run_homework_detail(
                             "analysis": "", "choices": q.choices.iter().map(|ch| json!({
                                 "choiceId": ch.id, "choiceContent": ch.content,
                             })).collect::<Vec<_>>(),
+                            // 任务附件（老师给的指导书）——未交时也要能下载
+                            "taskEid": q.task_eid, "taskResName": q.task_res_name,
+                            "answerEid": q.answer_eid, "answerResName": "",
+                            "attachments": [],
                         })
                     }).collect::<Vec<_>>(),
                 })
@@ -1678,8 +1682,8 @@ pub fn run_homework_detail(
             let q = row.get("paperQuestion").cloned().unwrap_or(json!({}));
             // candidateAnswer 可能是字符串，也可能是 {stuAnswer, attachmentList[]}（文件题）
             let ca = q.get("candidateAnswer").cloned().unwrap_or(Value::Null);
-            let (my_text, attachments) = match &ca {
-                Value::String(s) => (s.clone(), Vec::<String>::new()),
+            let (my_text, attachments): (String, Vec<Value>) = match &ca {
+                Value::String(s) => (s.clone(), Vec::new()),
                 // 多选/填空可能给数组
                 Value::Array(a) => (
                     a.iter()
@@ -1690,9 +1694,20 @@ pub fn run_homework_detail(
                 ),
                 Value::Object(o) => (
                     o.get("stuAnswer").and_then(Value::as_str).unwrap_or("").to_string(),
+                    // 附件要**带 eid** —— 只给文件名的话前端没法下载
                     o.get("attachmentList")
                         .and_then(Value::as_array)
-                        .map(|a| a.iter().filter_map(|x| x.get("filename").and_then(Value::as_str).map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| {
+                                    let name = x.get("filename").and_then(Value::as_str)?;
+                                    Some(json!({
+                                        "name": name,
+                                        "eid": x.get("eid").and_then(Value::as_str).unwrap_or(""),
+                                    }))
+                                })
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default(),
                 ),
                 _ => (String::new(), Vec::new()),
@@ -1706,6 +1721,11 @@ pub fn run_homework_detail(
                 "candidateScore": q.get("candidateScore"),
                 "myAnswerText": my_text,
                 "attachments": attachments,
+                // 任务附件（老师给的指导书）与我的作答附件 —— 都要 eid 才能下载
+                "taskEid": q.get("taskEid").and_then(Value::as_str).unwrap_or(""),
+                "taskResName": q.get("taskResName").and_then(Value::as_str).unwrap_or(""),
+                "answerEid": q.get("answerEid").and_then(Value::as_str).unwrap_or(""),
+                "answerResName": q.get("answerResName").and_then(Value::as_str).unwrap_or(""),
                 "standardAnswer": q.get("standardAnswer"),
                 "analysis": q.get("analysis").and_then(Value::as_str).unwrap_or(""),
                 "choices": q.get("choices").and_then(Value::as_array).cloned().unwrap_or_default()
@@ -1936,7 +1956,7 @@ pub fn run_ai_answer(
             paper_id: q.id.clone(),
             question_no: q.question_no.clone(),
             question_type: q.question_type.clone(),
-            answer: ans,
+            answer: json!(ans),
         });
     }
 
@@ -2280,7 +2300,7 @@ pub fn run_ai_answer_bulk_with(
                 paper_id: q.id.clone(),
                 question_no: q.question_no.clone(),
                 question_type: q.question_type.clone(),
-                answer: ans,
+                answer: json!(ans),
             }),
             None => unknown.push(q.question_no.clone()),
         }
@@ -2352,36 +2372,6 @@ pub fn run_ai_answer_bulk_with(
     }))
 }
 
-/// 从题目里抽出 `<img src>` 的原始地址（可能是相对路径）。
-fn extract_img_srcs(q: &neumooc_core::homework::Question) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push_from = |html: &str| {
-        let mut rest = html;
-        while let Some(i) = rest.find("<img") {
-            rest = &rest[i..];
-            let Some(j) = rest.find('>') else { break };
-            let tag = &rest[..j];
-            for qq in ['"', '\''] {
-                if let Some(k) = tag.find(&format!("src={qq}")) {
-                    let after = &tag[k + 5..];
-                    if let Some(e) = after.find(qq) {
-                        let url = after[..e].trim();
-                        if !url.is_empty() && !out.iter().any(|x| x == url) {
-                            out.push(url.to_string());
-                        }
-                    }
-                }
-            }
-            rest = &rest[j..];
-        }
-    };
-    push_from(&q.stem);
-    push_from(&q.stem_text);
-    for c in &q.choices {
-        push_from(&c.content);
-    }
-    out
-}
 
 /// 把题干/选项里的图片下载成 **data URL**，供多模态模型使用。
 ///
@@ -2399,7 +2389,7 @@ fn collect_images(c: &Client, q: &neumooc_core::homework::Question) -> Vec<Strin
     const MAX_IMAGES: usize = 4;
 
     let mut out = Vec::new();
-    for src in extract_img_srcs(q).into_iter().take(MAX_IMAGES) {
+    for src in neumooc_core::homework::extract_img_srcs(q).into_iter().take(MAX_IMAGES) {
         // 已经是 data URL 就直接用
         if src.starts_with("data:image/") {
             out.push(src);

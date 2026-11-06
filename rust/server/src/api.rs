@@ -209,6 +209,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/accounts/:id", get(crate::endpoints::get_account).delete(crate::endpoints::delete_account))
         .route("/api/accounts/:id/tasks/answer", post(crate::endpoints::task_answer))
         .route("/api/accounts/:id/tasks/ai-answer", post(crate::endpoints::task_ai_answer))
+        // 附件 / 文件题
+        .route("/api/accounts/:id/files", post(crate::endpoints::upload_file))
+        .route("/api/accounts/:id/files/:eid", get(crate::endpoints::download_file))
+        .route(
+            "/api/accounts/:id/tasks/:test_id/questions/:no/image",
+            get(crate::endpoints::question_image),
+        )
         .route("/api/llm/status", get(crate::endpoints::llm_status))
         .route(
             "/api/llm/config",

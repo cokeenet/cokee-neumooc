@@ -192,7 +192,13 @@ pub struct Answer {
     pub question_no: String,
     #[serde(rename = "questionType")]
     pub question_type: String,
-    pub answer: String,
+    /// 答案。
+    ///
+    /// * 选择题 / 填空 / 主观：`String`（多选逗号分隔，多空 `|` 分隔）
+    /// * **文件题（type=40）**：`{"stuAnswer":"","attachmentList":[{"eid","filename"}]}`
+    ///
+    /// 所以这里是 `Value` 而不是 `String` —— 早先定成 String 时文件题传不上去。
+    pub answer: Value,
 }
 
 impl Client {
@@ -506,4 +512,40 @@ impl Client {
             true,
         )
     }
+}
+
+/// 从题干/选项的富文本里抽出 `<img src="...">` 的原始地址。
+///
+/// 平台返回的 `src` 可能是相对路径（`/content/s3/getObjectIO?eid=...`），
+/// 也可能是 absolute URL。**不做任何改写**，调用方自己决定怎么取。
+///
+/// 抽不出来（没有 `<img`）就返回空 vec —— 不是错误，大部分题本来就没有图。
+pub fn extract_img_srcs(q: &Question) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push_from = |html: &str| {
+        let mut rest = html;
+        while let Some(i) = rest.find("<img") {
+            rest = &rest[i..];
+            let Some(j) = rest.find('>') else { break };
+            let tag = &rest[..j];
+            for quote in ['"', '\''] {
+                if let Some(k) = tag.find(&format!("src={quote}")) {
+                    let after = &tag[k + 5..];
+                    if let Some(e) = after.find(quote) {
+                        let url = after[..e].trim();
+                        if !url.is_empty() && !out.iter().any(|x| x == url) {
+                            out.push(url.to_string());
+                        }
+                    }
+                }
+            }
+            rest = &rest[j..];
+        }
+    };
+    push_from(&q.stem);
+    push_from(&q.stem_text);
+    for c in &q.choices {
+        push_from(&c.content);
+    }
+    out
 }

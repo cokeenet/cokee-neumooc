@@ -218,6 +218,16 @@ impl Client {
 
     /// 构造带公共请求头的请求（`request` / `request_bytes` / `request_multipart` 共用）。
     fn prepare(&self, method: &str, path: &str) -> Result<reqwest::blocking::RequestBuilder> {
+        self.prepare_ex(method, path, true)
+    }
+
+    /// `json_ct=false` 时不设 `Content-Type` —— multipart 要用自己的（带 boundary）。
+    fn prepare_ex(
+        &self,
+        method: &str,
+        path: &str,
+        json_ct: bool,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
         // 签名只覆盖**相对路径**（APK 用 options.getUrl()），不含域名与 query
         let sign_path = if path.starts_with('/') {
             path.to_string()
@@ -230,12 +240,14 @@ impl Client {
         let mut req = self
             .http
             .request(m, format!("{}{}", self.base, sign_path))
-            .header("Content-Type", "application/json;charset=UTF-8")
-            .header("Accept", "application/json, text/plain, */*")
-            .header(
-                "Id-Code",
-                build_id_code(Some(self.session.user_id.as_str()), &sign_path),
-            );
+            .header("Accept", "application/json, text/plain, */*");
+        if json_ct {
+            req = req.header("Content-Type", "application/json;charset=UTF-8");
+        }
+        let mut req = req.header(
+            "Id-Code",
+            build_id_code(Some(self.session.user_id.as_str()), &sign_path),
+        );
         if !self.tenant_id.is_empty() {
             req = req.header("Tenant-Id", &self.tenant_id);
         }
@@ -277,10 +289,17 @@ impl Client {
         path: &str,
         form: reqwest::blocking::multipart::Form,
     ) -> Result<Value> {
-        let req = self
-            .prepare("POST", path)?
-            .header("Content-Type", "multipart/form-data")
-            .multipart(form);
+        // ⚠️ **不要手动设 Content-Type**。
+        //
+        // reqwest 的 `.multipart()` 会自己写 `multipart/form-data; boundary=...`。
+        // 但 `prepare()` 已经设了 `Content-Type: application/json`，
+        // 而 `.header()` 在 `.multipart()` 之前调用 —— 结果是 json 那个头
+        // **覆盖掉了 boundary**，服务端解析不出任何字段。
+        //
+        // 实测症状：`/content/s3/putObject` 报「[1] source不能为空」，
+        // 明明 form 里带了 source。去掉手动头之后立刻成功。
+        // `json_ct=false`：不设 Content-Type，交给 `.multipart()` 写带 boundary 的
+        let req = self.prepare_ex("POST", path, false)?.multipart(form);
         let resp = req.send()?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
