@@ -24,6 +24,8 @@ export default function SettingsPanel({ me }: { me: string }) {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
+  const [effort, setEffort] = useState('medium');
+  const [stream, setStream] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -33,6 +35,8 @@ export default function SettingsPanel({ me }: { me: string }) {
       setCfg(r);
       setModel(r.model);
       setBaseUrl(r.base_url);
+      setEffort(r.effort || 'medium');
+      setStream(r.stream);
       setApiKey(''); // 永远不回填 key
     } catch (e) {
       setErr((e as Error).message);
@@ -49,6 +53,8 @@ export default function SettingsPanel({ me }: { me: string }) {
         api_key: apiKey.trim() || undefined, // 空 = 不改
         model: model.trim(),
         base_url: baseUrl.trim(),
+        effort,
+        stream,
       });
       await load();
     },
@@ -115,6 +121,43 @@ export default function SettingsPanel({ me }: { me: string }) {
           </span>
         </div>
 
+        <div className="field">
+          <label htmlFor="llm-effort">
+            思考强度
+            {cfg?.effort_from_env && <span className="badge badge-muted" style={{ marginLeft: 6 }}>被环境变量覆盖</span>}
+          </label>
+          <select id="llm-effort" className="input" value={effort}
+            onChange={(e) => setEffort(e.target.value)}>
+            {(cfg?.efforts ?? ['off', 'minimal', 'low', 'medium', 'high', 'max']).map((v) => (
+              <option key={v} value={v}>
+                {v === 'off' ? 'off（不思考，最快）'
+                  : v === 'minimal' ? 'minimal（极少）'
+                  : v === 'low' ? 'low（少）'
+                  : v === 'medium' ? 'medium（默认）'
+                  : v === 'high' ? 'high（多）'
+                  : 'max（最多，最慢）'}
+              </option>
+            ))}
+          </select>
+          <span className="muted small">
+            越高越准但越慢、越贵。模型不支持时会自动忽略。
+          </span>
+        </div>
+
+        <div className="field">
+          <label htmlFor="llm-stream">
+            流式响应
+            {cfg?.stream_from_env && <span className="badge badge-muted" style={{ marginLeft: 6 }}>被环境变量覆盖</span>}
+          </label>
+          <label className="row" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+            <input id="llm-stream" type="checkbox" checked={stream}
+              onChange={(e) => setStream(e.target.checked)} />
+            <span className="small">
+              开启后请求走 SSE（本平台内部会聚合成完整结果，只影响长答案的响应速度）
+            </span>
+          </label>
+        </div>
+
         <div className="row" style={{ gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
           <button className="btn btn-primary" disabled={save.busy} onClick={() => void save.run()}>
             {save.busy ? '保存中…' : '保存'}
@@ -143,6 +186,7 @@ export default function SettingsPanel({ me }: { me: string }) {
           <li>AI 只<strong>存草稿</strong>，交卷仍需手动确认。</li>
           <li>环境变量 <code>NEUMOOC_LLM_*</code> 优先于本页设置。</li>
           <li>保存后立即生效，<strong>无需重启</strong>。</li>
+          <li>题干/选项里带图时会自动转成多模态发送（模型不支持则忽略图片）。</li>
         </ul>
       </div>
     </div>

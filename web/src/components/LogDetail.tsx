@@ -90,7 +90,9 @@ export default function LogDetail({ execId, detail, defaultOpen = false }: Props
                   // 包里根本没有，只有颜色没有行内布局
                   className={`log-line ${
                     l.level === 'ok' ? 'is-ok' : l.level === 'error' ? 'is-err'
-                    : l.level === 'warn' ? 'is-warn' : 'is-info'
+                    : l.level === 'warn' ? 'is-warn'
+                    : l.level === 'think' ? 'is-think'
+                    : l.level === 'answer' ? 'is-answer' : 'is-info'
                   }`}
                 >
                   <span className="log-time">{l.ts ? fmtTime(l.ts) : ''}</span>

@@ -1087,6 +1087,10 @@ pub struct AiAnswerIn {
     pub only_no: Vec<String>,
     #[serde(default)]
     pub max: Option<u64>,
+    /// **只投递不等待**。前端拿 `execution_id` 去订阅 SSE 实时日志，
+    /// 算完再自己拉结果。默认 false（等结果一起返回）。
+    #[serde(default)]
+    pub no_wait: bool,
 }
 
 pub async fn task_ai_answer(
@@ -1139,9 +1143,15 @@ pub async fn task_ai_answer(
         let mut reg = st.workers.lock().expect("锁中毒");
         let w = reg.get_or_spawn(id);
         w.submit(crate::worker::Job::new("ai_answer", move |token| {
-            crate::tasks::run_ai_answer_bulk(&ctx, id, &args, token)
+            crate::tasks::run_ai_answer_bulk_with(&ctx, id, &args, token, Some(exec_id))
         }).on_done(on_done))
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+
+    // **只投递**：前端要拿 execution_id 去订阅 SSE，实时看思考过程，
+    // 算完再自己拉结果（AI 作答可能 30~60 秒，干等体验很差）
+    if body.no_wait {
+        return Ok(Json(json!({ "ok": true, "execution_id": exec_id, "state": "running" })));
     }
 
     // 等结果：前端要拿 answers/logs 展示
@@ -1187,6 +1197,16 @@ pub async fn llm_config_get(
         "key_from_env": store::setting_from_env("NEUMOOC_LLM_API_KEY"),
         "model_from_env": store::setting_from_env("NEUMOOC_LLM_MODEL"),
         "base_url_from_env": store::setting_from_env("NEUMOOC_LLM_BASE_URL"),
+        // 思考强度 / 流式
+        "effort": store::setting(&conn, "NEUMOOC_LLM_EFFORT")
+            .unwrap_or_else(|| "medium".into()),
+        "stream": store::setting(&conn, "NEUMOOC_LLM_STREAM")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+            .unwrap_or(false),
+        "effort_from_env": store::setting_from_env("NEUMOOC_LLM_EFFORT"),
+        "stream_from_env": store::setting_from_env("NEUMOOC_LLM_STREAM"),
+        // 可选值（前端下拉用，避免两边写死不一致）
+        "efforts": ["off", "minimal", "low", "medium", "high", "max"],
     })))
 }
 
@@ -1199,6 +1219,12 @@ pub struct LlmConfigIn {
     pub model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// 思考强度：off/minimal/low/medium/high/max
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// 是否流式
+    #[serde(default)]
+    pub stream: Option<bool>,
     /// 传 true 显式清除已保存的 key
     #[serde(default)]
     pub clear_key: bool,
@@ -1227,6 +1253,19 @@ pub async fn llm_config_set(
     }
     if let Some(b) = body.base_url.as_ref() {
         store::set_setting(&conn, "NEUMOOC_LLM_BASE_URL", b.trim())
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if let Some(e) = body.effort.as_ref() {
+        // 只收合法值 —— 写进库里的东西要能被 llm_config() 解析出来
+        let v = e.trim().to_ascii_lowercase();
+        if !v.is_empty() && crate::llm::Effort::parse(&v).is_none() {
+            return Err(ApiError::bad_request(format!("未知的思考强度「{e}」")));
+        }
+        store::set_setting(&conn, "NEUMOOC_LLM_EFFORT", &v)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
+    if let Some(s) = body.stream {
+        store::set_setting(&conn, "NEUMOOC_LLM_STREAM", if s { "on" } else { "" })
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
     Ok(Json(json!({ "ok": true })))

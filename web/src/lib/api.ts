@@ -17,6 +17,14 @@ export interface LlmConfig {
   key_from_env: boolean;
   model_from_env: boolean;
   base_url_from_env: boolean;
+  /** 思考强度：off / minimal / low / medium / high / max */
+  effort: string;
+  /** 是否请求流式（内部聚合，行为一致，只是能更早拿数据） */
+  stream: boolean;
+  effort_from_env: boolean;
+  stream_from_env: boolean;
+  /** 后端给的合法取值，避免两边写死不一致 */
+  efforts: string[];
 }
 
 export interface ExecResult<T = unknown> {
@@ -65,7 +73,10 @@ export const api = {
   /** AI 配置（**key 打码**，只回 has_key 与前后 4 位） */
   llmConfig: () => req<LlmConfig>('/llm/config'),
   /** 保存 AI 配置。`api_key` 空 = 不修改；`clear_key` 显式清除 */
-  llmSetConfig: (body: { api_key?: string; model?: string; base_url?: string; clear_key?: boolean }) =>
+  llmSetConfig: (body: {
+    api_key?: string; model?: string; base_url?: string;
+    effort?: string; stream?: boolean; clear_key?: boolean;
+  }) =>
     req<{ ok: boolean }>('/llm/config', { method: 'PUT', body: JSON.stringify(body) }),
   /** 用当前配置真发一次请求 */
   llmTest: () => req<{ ok: boolean; reply?: string; error?: string }>('/llm/test', { method: 'POST' }),
@@ -167,15 +178,33 @@ export const api = {
    * **AI 批量作答**：后端取题 → 调模型 → 算答案（一次调用答完整份）。
    * 同样要检查 `ok`（见 `answerTask` 的说明）。
    */
-  aiAnswerTask: async (id: number, testId: string, opts: { submit?: boolean; dry_run?: boolean } = {}) => {
+  /**
+   * **AI 批量作答**。
+   *
+   * `no_wait: true` 时立刻返回 `execution_id`，前端据此订阅 SSE 看思考过程，
+   * 算完再用 `execution(id)` 拉结果。默认等结果一起返回。
+   */
+  aiAnswerTask: async (id: number, testId: string, opts: {
+    submit?: boolean; dry_run?: boolean; no_wait?: boolean;
+  } = {}) => {
     const r = await req<ExecResult<{ answered?: number; total?: number; submitted?: boolean; unknown?: string[] }>>(
       `/accounts/${id}/tasks/ai-answer`,
       { method: 'POST', body: JSON.stringify({ test_id: testId, ...opts }) },
     );
     if (!r.ok) throw new Error(r.error || 'AI 作答失败');
-    return { ...(r.data ?? {}), logs: r.logs } as {
+    // ⚠️ `no_wait: true` 时后端返回的是 `{ok, execution_id, state}`，
+    // **没有 `data`** —— 早先只展开 `r.data`，`execution_id` 就丢了，
+    // 前端拿不到 id 也就订阅不了实时流（面板永远空白）。
+    return {
+      ...(r.data ?? {}),
+      logs: r.logs,
+      execution_id: r.execution_id,
+      state: (r as unknown as { state?: string }).state,
+    } as {
       answered?: number; total?: number; submitted?: boolean; unknown?: string[];
       logs?: LogLine[];
+      execution_id?: number;
+      state?: string;
     };
   },
   /** 作业试卷（题目/我的答案/标准答案/逐题得分），结构对齐考试试卷 */

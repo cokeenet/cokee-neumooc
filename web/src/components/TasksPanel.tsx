@@ -22,6 +22,7 @@ import {
   api, type HomeworkDetail, type HomeworkDetailQuestion, type HomeworkItem,
 } from '../lib/api';
 import { useAction, useResource } from '../lib/useResource';
+import { useExecStream } from '../lib/useExecStream';
 import { fmtDeadline, fmtTs } from '../lib/labels';
 import EmptyState from 'korikura-webui/components/ui/EmptyState';
 import ErrorState from 'korikura-webui/components/ui/ErrorState';
@@ -355,9 +356,31 @@ export default function TasksPanel({ accountId }: Props) {
     if (r) setAnswerNote(submit ? `已交卷（${r.saved ?? 0} 题）` : `已保存草稿（${r.saved ?? 0} 题）`);
   }, [answerAction]);
 
+  /** AI 作答的执行 id —— 用来订阅实时日志 */
+  const [aiExecId, setAiExecId] = useState<number | null>(null);
+  /** 实时流：思考过程 + 答案增量（AI 作答时边算边看） */
+  const live = useExecStream(aiExecId);
+
   const aiAction = useAction(async (submit: boolean) => {
     if (!openId) return;
-    const r = await api.aiAnswerTask(accountId, openId, { submit });
+    // **只投递**，拿 execution_id 去订阅 SSE 看思考过程（干等 30~60 秒体验太差）
+    const submitted = await api.aiAnswerTask(accountId, openId, { submit, no_wait: true });
+    const eid = submitted.execution_id;
+    if (eid) {
+      setAiExecId(eid);
+      // 轮询到执行结束（SSE 负责"过程"，这里负责"结果"）
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const ex = await api.execution(eid).catch(() => null);
+        if (ex && ['done', 'failed', 'cancelled'].includes(ex.state)) {
+          if (ex.state !== 'done') {
+            throw new Error((ex.detail as { error?: string })?.error || 'AI 作答失败');
+          }
+          break;
+        }
+      }
+    }
+    const r = { answered: 0, total: 0, submitted: false } as { answered?: number; total?: number; submitted?: boolean };
     // AI 答完后刷新详情，让用户看到保存的答案
     detailCache.current.delete(openId);
     const t = items.find((x) => x.test_id === openId);
@@ -509,11 +532,13 @@ export default function TasksPanel({ accountId }: Props) {
             <span className="card-meta">{openId ? '' : '从左侧选择'}</span>
           </h2>
           {/* ── 作答操作条 ── */}
-          {paper && !answering && (
+          {paper && (
             <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-              <button className="btn btn-primary btn-sm" onClick={() => setAnswering(true)}>
-                开始作答
-              </button>
+              {!answering && (
+                <button className="btn btn-primary btn-sm" onClick={() => setAnswering(true)}>
+                  开始作答
+                </button>
+              )}
               <button className="btn btn-sm" disabled={aiAction.busy}
                 title="后端取题 → 调 AI → 一次算完整份答案，保存为草稿（不交卷）"
                 onClick={() => void aiAction.run(false)}>
@@ -541,6 +566,53 @@ export default function TasksPanel({ accountId }: Props) {
               <button className="btn btn-sm" onClick={() => { setAnswering(false); setDraft(new Map()); }}>
                 退出作答
               </button>
+            </div>
+          )}
+
+          {/* AI 作答过程：**实时**显示思考与答案增量。
+              长任务（30~60 秒）如果只转圈，用户会以为卡死了。 */}
+          {(aiAction.busy || (aiExecId && (live.thinking || live.answer))) && (
+            <div className="card" style={{ marginBottom: 12, background: 'var(--bg-soft, #f9fafb)' }}>
+              <div className="card-head" style={{ marginBottom: 6 }}>
+                <h3 className="card-title" style={{ fontSize: 14 }}>
+                  AI 正在作答
+                  {live.done
+                    ? <span className="badge badge-ok" style={{ marginLeft: 8 }}>已完成</span>
+                    : <span className="badge badge-run" style={{ marginLeft: 8 }}>进行中…</span>}
+                </h3>
+                <span className="card-meta">
+                  {live.thinking.length > 0 && `思考 ${live.thinking.length} 字`}
+                  {live.answer.length > 0 && ` · 答案 ${live.answer.length} 字`}
+                </span>
+              </div>
+              {/* 思考过程默认折叠 —— 它很长，但排查时很有用 */}
+              {live.thinking && (
+                <details style={{ marginBottom: 8 }}>
+                  <summary className="muted small" style={{ cursor: 'pointer' }}>
+                    展开思考过程（{live.thinking.split('\n').length} 段）
+                  </summary>
+                  <div className="log-panel" style={{ height: 200, marginTop: 6 }}>
+                    {live.thinking.split('\n').map((line, i) => (
+                      <div key={i} className="log-line is-think"><span>{line}</span></div>
+                    ))}
+                  </div>
+                </details>
+              )}
+              {live.answer && (
+                <div>
+                  <span className="muted small">答案：</span>
+                  <div className="log-panel" style={{ height: 120, marginTop: 6 }}>
+                    {live.answer.split('\n').map((line, i) => (
+                      <div key={i} className="log-line is-answer"><span>{line}</span></div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!live.thinking && !live.answer && aiAction.busy && (
+                <p className="muted small" style={{ margin: 0 }}>
+                  已提交，等待模型输出…（思考过程会实时出现在这里）
+                </p>
+              )}
             </div>
           )}
 

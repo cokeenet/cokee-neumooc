@@ -289,7 +289,9 @@ export default function MakeupPanel({ accountId }: Props) {
                 key={i}
                 className={`log-line ${
                   l.level === 'ok' ? 'is-ok' : l.level === 'error' ? 'is-err'
-                  : l.level === 'warn' ? 'is-warn' : 'is-info'
+                  : l.level === 'warn' ? 'is-warn'
+                  : l.level === 'think' ? 'is-think'
+                  : l.level === 'answer' ? 'is-answer' : 'is-info'
                 }`}
               >
                 <span>{l.message}</span>

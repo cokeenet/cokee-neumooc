@@ -670,3 +670,25 @@
   .exam-list-card { position: static; }
   .exam-list { max-height: 320px; }
 }
+
+/* ── AI 实时输出（思考 / 答案） ──
+ *
+ * `think` 和 `answer` 是 LLM 流式增量写进 logs 的两个级别（见
+ * `tasks.rs::LogSink`）。包里没有这两级，所以在这里补样式：
+ *
+ * * 思考：灰字 + 斜体 + 左边框 —— 要能看见，但不能抢答案的注意力
+ * * 答案：正常字色 —— 这是用户真正要的东西
+ */
+.log-line.is-think {
+  color: var(--muted, #6b7280);
+  font-style: italic;
+  border-left: 2px solid rgba(107, 114, 128, 0.35);
+  padding-left: 8px;
+  opacity: 0.9;
+}
+
+.log-line.is-answer {
+  color: var(--fg, #111827);
+  border-left: 2px solid rgba(34, 197, 94, 0.55);
+  padding-left: 8px;
+}

@@ -48,6 +48,47 @@ impl Client {
         })
     }
 
+    /// 取一个**二进制资源**（图片/附件）。
+    ///
+    /// `path` 可以是相对路径（`/content/s3/getObjectIO?...`）或绝对 URL。
+    ///
+    /// ## 为什么不能用 `request()`
+    ///
+    /// `request()` 假定响应是 `{code,msg,data}` 的 JSON，会尝试解析并报错。
+    /// 图片是裸字节，必须走这条独立的通道。
+    ///
+    /// ## 鉴权
+    ///
+    /// 平台的对象存储**也要 `Authorization`** —— 不带 token 拿到的是一段
+    /// JSON 错误（HTTP 200），再按魔数一判就知道不是图片。
+    pub fn fetch_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let url = if path.starts_with("http://") || path.starts_with("https://") {
+            path.to_string()
+        } else if path.starts_with('/') {
+            format!("{}{}", self.base, path)
+        } else {
+            format!("{}/{}", self.base, path)
+        };
+        let mut req = self
+            .http
+            .get(&url)
+            .header("Accept", "image/*,*/*");
+        if !self.session.access_token.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.session.access_token));
+        }
+        if !self.tenant_id.is_empty() {
+            req = req.header("Tenant-Id", &self.tenant_id);
+        }
+        let resp = req.send()?;
+        if !resp.status().is_success() {
+            return Err(Error::Biz {
+                code: resp.status().as_u16() as i64,
+                msg: format!("取资源失败：{}", url),
+            });
+        }
+        Ok(resp.bytes()?.to_vec())
+    }
+
     pub fn base(&self) -> &str {
         &self.base
     }

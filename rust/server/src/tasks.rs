@@ -48,12 +48,33 @@ pub fn default_base() -> String {
 }
 
 /// 执行一个任务所需的共享上下文。
-/// LLM 连接配置（key / base_url / model）。
+/// LLM 连接配置。
+///
+/// 字段对齐 DSH 的 provider/model 两层，但只留影响答题的部分。
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    /// 思考强度（off/minimal/low/medium/high/max）
+    pub effort: crate::llm::Effort,
+    /// 是否请求流式（内部聚合，行为与关闭时一致，只是能更早拿数据）
+    pub stream: bool,
+}
+
+impl LlmConfig {
+    /// 转成调用参数。
+    pub fn options(&self, max_tokens: Option<u32>) -> crate::llm::Options {
+        crate::llm::Options {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            effort: self.effort,
+            stream: self.stream,
+            max_tokens,
+            timeout_secs: 180,
+        }
+    }
 }
 
 pub struct TaskCtx {
@@ -81,6 +102,13 @@ impl TaskCtx {
                 .unwrap_or_else(|| "https://api.z.ai/api/paas/v4".into()),
             model: store::setting(&c, "NEUMOOC_LLM_MODEL")
                 .unwrap_or_else(|| "glm-4.5-flash".into()),
+            effort: store::setting(&c, "NEUMOOC_LLM_EFFORT")
+                .and_then(|s| crate::llm::Effort::parse(&s))
+                .unwrap_or_default(),
+            // 默认不开流式：多一道解析、个别厂商支持不全，收益只在长答案时明显
+            stream: store::setting(&c, "NEUMOOC_LLM_STREAM")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+                .unwrap_or(false),
         })
     }
 
@@ -1868,7 +1896,9 @@ pub fn run_ai_answer(
             &q.question_type,
         );
 
-        let reply = match ask_llm(&cfg.base_url, &cfg.api_key, &cfg.model, &prompt) {
+        // 题干/选项里带图时，把图片一起发（模型不支持会自动忽略）
+        let imgs = collect_images(&c, q);
+        let done = match ask_llm(&cfg, &prompt, &imgs, None) {
             Ok(r) => r,
             Err(e) => {
                 logs.push(json!({ "level": "warn", "message": format!("第 {} 题取答案失败：{e}", q.question_no) }));
@@ -1876,6 +1906,15 @@ pub fn run_ai_answer(
                 continue;
             }
         };
+        // 思考过程单独记一笔 —— 答案错了能看出是哪一步想歪的
+        if !done.reasoning.trim().is_empty() {
+            logs.push(json!({
+                "level": "info",
+                "message": format!("第 {} 题思考：{}", q.question_no,
+                    done.reasoning.trim().chars().take(200).collect::<String>()),
+            }));
+        }
+        let reply = done.content;
 
         // 选择题 → 字母映射成 choiceId；填空/主观 → 直接用文本
         let ans = match prompt_kind(&q.question_type) {
@@ -1938,44 +1977,7 @@ pub fn run_ai_answer(
     }))
 }
 
-/// 调一次 LLM（OpenAI 兼容 `/chat/completions`）。
-///
-/// `temperature=0` —— 要稳定答案，不要创意。
-fn ask_llm(base: &str, key: &str, model: &str, prompt: &str) -> Result<String> {
-    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-    let body = json!({
-        "model": model,
-        "messages": [{ "role": "user", "content": prompt }],
-        "temperature": 0,
-    });
-    let http = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| Error::Invalid(format!("HTTP 客户端构造失败：{e}")))?;
-    let resp = http
-        .post(&url)
-        .header("Authorization", format!("Bearer {key}"))
-        .json(&body)
-        .send()
-        .map_err(|e| Error::Invalid(format!("LLM 请求失败：{e}")))?;
-    let status = resp.status();
-    let text = resp.text().unwrap_or_default();
-    if !status.is_success() {
-        return Err(Error::Invalid(format!(
-            "LLM 返回 {status}：{}",
-            text.chars().take(200).collect::<String>()
-        )));
-    }
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|_| Error::Invalid(format!("LLM 响应不是 JSON：{}", text.chars().take(120).collect::<String>())))?;
-    v.get("choices")
-        .and_then(|a| a.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
-        .ok_or_else(|| Error::Invalid("LLM 响应里没有 content".into()))
-}
+
 
 // ───────────────────── 批量 JSON 作答（照搬 luban 原版策略） ─────────────────────
 
@@ -2129,6 +2131,19 @@ pub fn run_ai_answer_bulk(
     args: &Value,
     token: &CancelToken,
 ) -> Result<Value> {
+    run_ai_answer_bulk_with(ctx, account_id, args, token, None)
+}
+
+/// 同上，但把 LLM 增量**实时写进日志**（`exec_id` 用于定位执行记录）。
+///
+/// 前端接 `/api/executions/:id/stream` 就能边算边看思考和答案。
+pub fn run_ai_answer_bulk_with(
+    ctx: &TaskCtx,
+    account_id: i64,
+    args: &Value,
+    token: &CancelToken,
+    exec_id: Option<i64>,
+) -> Result<Value> {
     let test_id = args
         .get("test_id")
         .and_then(Value::as_str)
@@ -2155,8 +2170,18 @@ pub fn run_ai_answer_bulk(
     // 只把要答的题打包（index 用原始序号，方便回映射）
     let mut packed = Vec::new();
     let mut index_map: std::collections::HashMap<i64, usize> = Default::default();
+    // 题号 → 图片 data URL（多模态发送用）
+    let mut image_map: std::collections::HashMap<i64, Vec<String>> = Default::default();
+    // 答不了的题型（文件上传），单独列出来告诉用户
+    let mut skipped_unsupported: Vec<String> = Vec::new();
     for (i, q) in qs.iter().enumerate().take(max) {
         if !only_no.is_empty() && !only_no.contains(&q.question_no) {
+            continue;
+        }
+        // 文件上传题（type=40）平台要的是附件，AI 答不了 —— 直接跳过，
+        // 否则模型会瞎猜一个字母回来，我们既映射不了也交不上去。
+        if q.question_type == "40" {
+            skipped_unsupported.push(q.question_no.clone());
             continue;
         }
         let idx = i as i64;
@@ -2171,13 +2196,65 @@ pub fn run_ai_answer_bulk(
             item["options"] = json!(choices);
         }
         packed.push(item);
+        // 图片单独收：题干里的图对答题有用，但塞进 JSON 会让提示词爆炸，
+        // 改成多模态 parts 发（见下面 ask_llm 调用）
+        let imgs = collect_images(&c, q);
+        if !imgs.is_empty() {
+            image_map.insert(idx, imgs);
+        }
     }
     if packed.is_empty() {
         return Err(Error::Invalid("没有要答的题".into()));
     }
 
     let prompt = format!("{BULK_PROMPT}{}", serde_json::to_string_pretty(&packed).unwrap_or_default());
-    let reply = ask_llm(&cfg.base_url, &cfg.api_key, &cfg.model, &prompt)?;
+    // 把所有题的图片合并成一次多模态请求 —— 分开发反而让模型看不到题图对应关系
+    let mut all_images: Vec<String> = Vec::new();
+    for imgs in image_map.values() {
+        for i in imgs {
+            if !all_images.iter().any(|x| x == i) {
+                all_images.push(i.clone());
+            }
+        }
+    }
+    let image_note = if all_images.is_empty() {
+        None
+    } else {
+        Some(all_images.len())
+    };
+    // 接上实时推送：思考与答案分开写日志，前端 SSE 能边算边看
+    // 先建好（exec_id 可能为 None，但 LogSink 本身开销可忽略），
+    // 这样后面 flush 尾巴时不用处理「未初始化」
+    let mut sink_holder = LogSink::new(&ctx.conn, exec_id.unwrap_or(0));
+    let sink: Option<&mut dyn crate::llm::DeltaSink> = if exec_id.is_some() {
+        Some(&mut sink_holder)
+    } else {
+        None
+    };
+    let done = ask_llm_streaming(&cfg, &prompt, &all_images, None, sink)?;
+
+    // 把 sink 里没凑满一批的尾巴刷出去（否则最后半句会丢），
+    // 并把**最终答案**单独记一行 —— 模型可能直接回 JSON（不进 delta 的 content），
+    // 不记的话界面上"答案"区域永远是空的。
+    if let Some(eid) = exec_id {
+        if let Ok(c) = ctx.conn.lock() {
+            let tail = sink_holder.take_tail();
+            if !tail.trim().is_empty() {
+                let _ = store::append_log(&c, eid, "think", tail.trim());
+            }
+            if !done.content.trim().is_empty() {
+                let _ = store::append_log(&c, eid, "answer", done.content.trim());
+            }
+        }
+    }
+    // 思考过程留档（答案不对时能看出是哪一步想歪的）—— logs 下面才建，
+    // 先存起来，晚点一起塞进去
+    let reasoning_note = if done.reasoning.trim().is_empty() {
+        None
+    } else {
+        Some(done.reasoning.trim().chars().take(300).collect::<String>())
+    };
+    let reply = done.content;
     let obj = extract_json_object(&reply).ok_or_else(|| {
         Error::Invalid(format!(
             "AI 回复不是 JSON：{}",
@@ -2187,6 +2264,12 @@ pub fn run_ai_answer_bulk(
 
     let mut answers: Vec<neumooc_core::homework::Answer> = Vec::new();
     let mut logs: Vec<Value> = Vec::new();
+    if let Some(n) = image_note {
+        logs.push(json!({ "level": "info", "message": format!("附带了 {n} 张题图（多模态）") }));
+    }
+    if let Some(r) = reasoning_note {
+        logs.push(json!({ "level": "info", "message": format!("AI 思考：{r}") }));
+    }
     let mut unknown: Vec<String> = Vec::new();
     for (k, v) in obj.as_object().into_iter().flatten() {
         let Ok(idx) = k.trim().parse::<i64>() else { continue };
@@ -2209,7 +2292,19 @@ pub fn run_ai_answer_bulk(
         }));
     }
     if answers.is_empty() {
-        return Err(Error::Invalid("AI 一个答案都没算出来".into()));
+        let why = if !skipped_unsupported.is_empty() && packed.is_empty() {
+            format!(
+                "这份作业的题都是文件上传题（{}），AI 答不了 —— 需要你手动上传附件。",
+                skipped_unsupported.join("、")
+            )
+        } else {
+            // 把模型的原文带出来 —— 否则用户只看到"没算出来"，不知道该改什么
+            format!(
+                "AI 没有给出可用答案。模型原文：{}",
+                reply.chars().take(300).collect::<String>()
+            )
+        };
+        return Err(Error::Invalid(why));
     }
     logs.push(json!({
         "level": "ok",
@@ -2236,8 +2331,187 @@ pub fn run_ai_answer_bulk(
         submitted = true;
         logs.push(json!({ "level": "ok", "message": "已交卷（不可逆）" }));
     }
+    if !skipped_unsupported.is_empty() {
+        logs.push(json!({
+            "level": "warn",
+            "message": format!("跳过了 {} 道文件上传题：{}（需手动上传附件）",
+                skipped_unsupported.len(), skipped_unsupported.join("、")),
+        }));
+    }
     Ok(json!({
         "total": qs.len(), "answered": answers.len(), "unknown": unknown,
+        "skipped_unsupported": skipped_unsupported,
         "submitted": submitted, "history_id": e.history_id, "logs": logs,
     }))
+}
+
+/// 从题目里抽出 `<img src>` 的原始地址（可能是相对路径）。
+fn extract_img_srcs(q: &neumooc_core::homework::Question) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push_from = |html: &str| {
+        let mut rest = html;
+        while let Some(i) = rest.find("<img") {
+            rest = &rest[i..];
+            let Some(j) = rest.find('>') else { break };
+            let tag = &rest[..j];
+            for qq in ['"', '\''] {
+                if let Some(k) = tag.find(&format!("src={qq}")) {
+                    let after = &tag[k + 5..];
+                    if let Some(e) = after.find(qq) {
+                        let url = after[..e].trim();
+                        if !url.is_empty() && !out.iter().any(|x| x == url) {
+                            out.push(url.to_string());
+                        }
+                    }
+                }
+            }
+            rest = &rest[j..];
+        }
+    };
+    push_from(&q.stem);
+    push_from(&q.stem_text);
+    for c in &q.choices {
+        push_from(&c.content);
+    }
+    out
+}
+
+/// 把题干/选项里的图片下载成 **data URL**，供多模态模型使用。
+///
+/// ## 为什么必须下载，不能直接把 URL 丢给模型
+///
+/// 平台的图片是 `/content/s3/getObjectIO?eid=...` 这种**相对路径**，
+/// 而且**需要 `Authorization`** 才能取到。模型的服务器访问不了
+/// （没 token，也不知道域名），直接发 URL 只会 401/404。
+///
+/// 所以这边先用自己的 client 取回字节，转成 `data:image/...;base64,` 再发。
+///
+/// 单张超过 4MB 或取不到就跳过 —— 宁可少一张图，不能让整题失败。
+fn collect_images(c: &Client, q: &neumooc_core::homework::Question) -> Vec<String> {
+    const MAX_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_IMAGES: usize = 4;
+
+    let mut out = Vec::new();
+    for src in extract_img_srcs(q).into_iter().take(MAX_IMAGES) {
+        // 已经是 data URL 就直接用
+        if src.starts_with("data:image/") {
+            out.push(src);
+            continue;
+        }
+        // 绝对 URL 也下载转 base64（模型侧可能取不到内网/带鉴权的地址）
+        let bytes = match c.fetch_bytes(&src) {
+            Ok(b) if !b.is_empty() && b.len() <= MAX_BYTES => b,
+            _ => continue,
+        };
+        // 按魔数判类型，别信 Content-Type
+        let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            "image/png"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "image/jpeg"
+        } else if bytes.starts_with(b"GIF8") {
+            "image/gif"
+        } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            "image/webp"
+        } else {
+            continue; // 不是认识的图片格式
+        };
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        out.push(format!("data:{mime};base64,{b64}"));
+    }
+    out
+}
+
+/// 调一次 LLM —— 走 [`crate::llm::complete`]，带思考强度与流式支持。
+///
+/// `images` 非空时按 OpenAI 多模态格式发（题干/选项里有图时用）。
+fn ask_llm(
+    cfg: &LlmConfig,
+    prompt: &str,
+    images: &[String],
+    max_tokens: Option<u32>,
+) -> Result<crate::llm::Completion> {
+    ask_llm_streaming(cfg, prompt, images, max_tokens, None)
+}
+
+/// 同上，但支持**把思考/答案实时推给界面**。
+///
+/// `sink` 每收到一段就调一次。答题任务里把它接到 `logs` 表，
+/// 前端用 `/api/executions/:id/stream` 就能边算边看。
+fn ask_llm_streaming(
+    cfg: &LlmConfig,
+    prompt: &str,
+    images: &[String],
+    max_tokens: Option<u32>,
+    mut sink: Option<&mut dyn crate::llm::DeltaSink>,
+) -> Result<crate::llm::Completion> {
+    let opts = cfg.options(max_tokens);
+    let msg = crate::llm::Message::user_text_with_images(prompt, images);
+    crate::llm::complete_streaming(&opts, &[msg], sink).map_err(Error::Invalid)
+}
+
+/// 把 LLM 增量转成日志行：**思考与答案分开记**（`level` 不同，前端好上色）。
+///
+/// 合并短增量：每 120 字符或遇换行才写一行，避免一秒写几百条把日志表撑爆
+/// —— SSE 是每 400ms 轮询一次的，写太碎反而看不出连贯性。
+struct LogSink<'a> {
+    conn: &'a std::sync::Mutex<rusqlite::Connection>,
+    exec_id: i64,
+    reasoning_buf: String,
+    content_buf: String,
+    /// 累计写了多少行（防止刷爆：超过上限就不再写，只保留最终结果）
+    written: usize,
+}
+
+impl<'a> LogSink<'a> {
+    fn new(conn: &'a std::sync::Mutex<rusqlite::Connection>, exec_id: i64) -> Self {
+        Self { conn, exec_id, reasoning_buf: String::new(), content_buf: String::new(), written: 0 }
+    }
+
+    fn flush(&mut self, reasoning: bool) {
+        let buf = if reasoning { &mut self.reasoning_buf } else { &mut self.content_buf };
+        if buf.trim().is_empty() {
+            buf.clear();
+            return;
+        }
+        if self.written >= 200 {
+            buf.clear(); // 到上限了，丢弃增量（最终答案仍会完整返回）
+            return;
+        }
+        if let Ok(c) = self.conn.lock() {
+            let level = if reasoning { "think" } else { "answer" };
+            let _ = store::append_log(&c, self.exec_id, level, buf.trim());
+            self.written += 1;
+        }
+        buf.clear();
+    }
+}
+
+impl LogSink<'_> {
+    /// 取走还没刷出去的内容（思考或答案的尾巴）。
+    fn take_tail(&mut self) -> String {
+        let mut out = String::new();
+        if !self.reasoning_buf.trim().is_empty() {
+            out.push_str(self.reasoning_buf.trim());
+        }
+        if !self.content_buf.trim().is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(self.content_buf.trim());
+        }
+        self.reasoning_buf.clear();
+        self.content_buf.clear();
+        out
+    }
+}
+
+impl crate::llm::DeltaSink for LogSink<'_> {
+    fn delta(&mut self, reasoning: bool, text: &str) {
+        let buf = if reasoning { &mut self.reasoning_buf } else { &mut self.content_buf };
+        buf.push_str(text);
+        if buf.len() >= 120 || text.contains('\n') {
+            self.flush(reasoning);
+        }
+    }
 }

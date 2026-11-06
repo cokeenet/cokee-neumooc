@@ -11,6 +11,7 @@ pub mod auth;
 pub mod crypto;
 pub mod db;
 pub mod endpoints;
+pub mod llm;
 pub mod notify;
 pub mod perm;
 pub mod rows;
