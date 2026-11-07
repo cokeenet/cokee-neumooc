@@ -251,22 +251,62 @@ fn spawn_background(state: Arc<api::AppState>) {
                         let _ = watcher.tick(&conn);
                     }
 
-                    // **按历史时段降频**：
+                    // ── 决定下一轮等多久 ──
                     //
-                    // 实测 378 条历史考勤集中在上课时间段（7-12 / 13-17 点），
-                    // 其余时段几乎为 0。全程匀速轮询等于大部分时间在空转 ——
-                    // 平台看到的只是「一台机器无差别刷接口」，这才是被封的原因。
+                    // 优先级：
+                    //   ① 有课表 → 严格按课表窗口（有课才查，没课最长等 30 分钟）
+                    //   ② 没课表 → 退回「按时段降频」的启发式（poll_policy）
                     //
-                    // 见 `poll_policy` 模块的注释（含那份真实分布）。
+                    // 课表从 `timetable.json` 读（由 `tools/jw-fetch.py` 抓，
+                    // systemd timer 每天跑 2 次）。教务接口校外可访问，
+                    // 不受校园网封禁影响。
                     let base = neumooc_server::scheduler::attendance_tick_secs();
-                    let factor = neumooc_server::poll_policy::slow_factor(std::time::SystemTime::now());
-                    let scaled = (base * factor) as f64;
+                    let wait_secs = {
+                        let tt = neumooc_server::timetable::load_from_file(
+                            // 路径由 `NEUMOOC_TIMETABLE` 指定；没设就用数据目录下的约定名
+                            &std::env::var("NEUMOOC_TIMETABLE").unwrap_or_else(|_| {
+                                format!(
+                                    "{}/timetable.json",
+                                    std::env::var("NEUMOOC_DATA")
+                                        .unwrap_or_else(|_| ".".into())
+                                        .trim_end_matches('/')
+                                )
+                            }),
+                        );
+                        let (h, m, wd) = local_hm_weekday();
+                        let now_min = h * 60 + m;
 
-                    // **加随机抖动**（±20%）：固定节拍本身就是机器特征 ——
-                    // 人不会每次都在 :00 整准时查。
-                    let jitter = scaled * 0.2 * (rand_jitter() - 0.5);
-                    let wait = ((scaled + jitter) as i64).max(30) as u64;
-                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                        match tt {
+                            Some(t) if !t.by_weekday.is_empty() => {
+                                if t.in_window(wd, now_min).is_some() {
+                                    // 窗口内：按基准间隔（180 秒），加抖动
+                                    let j = base as f64 * 0.2 * (rand_jitter() - 0.5);
+                                    ((base as f64 + j) as u64).max(60)
+                                } else if let Some(gap) = t.minutes_to_window(wd, now_min) {
+                                    // 还没到下一节课：睡到窗口前再起，最长 30 分钟一段
+                                    //
+                                    // 分段而不是一觉睡到点：万一课表过期了
+                                    //（比如临时加的课），30 分钟内能自愈。
+                                    let target = (gap as u64).saturating_sub(
+                                        neumooc_server::timetable::MARGIN_MIN as u64,
+                                    );
+                                    target.clamp(60, 30 * 60)
+                                } else {
+                                    // 今天没课了 → 30 分钟后再看（跨天/临时课兜底）
+                                    30 * 60
+                                }
+                            }
+                            _ => {
+                                // 没课表：老的启发式
+                                let factor =
+                                    neumooc_server::poll_policy::slow_factor(std::time::SystemTime::now());
+                                let scaled = (base * factor) as f64;
+                                let jitter = scaled * 0.2 * (rand_jitter() - 0.5);
+                                ((scaled + jitter) as i64).max(30) as u64
+                            }
+                        }
+                    };
+                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
                 }
             })
             .expect("起考勤监控线程失败");
@@ -289,4 +329,47 @@ fn rand_jitter() -> f64 {
     x ^= x >> 7;
     x ^= x << 17;
     (x % 1_000_000) as f64 / 1_000_000.0
+}
+
+/// 本地时间的 (时, 分, 星期几 1-7)。
+///
+/// 用 `localtime_r` 而不是手算 UTC+8 —— 这台机器有夏令时/时区配置，
+/// 硬编码会在换时区后错位（错位 = 有课时按没课处理 = 漏签）。
+#[cfg(unix)]
+fn local_hm_weekday() -> (i32, i32, i32) {
+    #[repr(C)]
+    struct Tm {
+        tm_sec: i32,
+        tm_min: i32,
+        tm_hour: i32,
+        tm_mday: i32,
+        tm_mon: i32,
+        tm_year: i32,
+        tm_wday: i32,
+        tm_yday: i32,
+        tm_isdst: i32,
+        tm_gmtoff: i64,
+        tm_zone: *const i8,
+    }
+    extern "C" {
+        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    unsafe {
+        let mut tm = std::mem::zeroed::<Tm>();
+        if localtime_r(&secs, &mut tm).is_null() {
+            return (12, 0, 1); // 取不到按中午，保守
+        }
+        // tm_wday: 0=周日 … 6=周六 → 转成 1=周一 … 7=周日
+        let wd = if tm.tm_wday == 0 { 7 } else { tm.tm_wday };
+        (tm.tm_hour, tm.tm_min, wd)
+    }
+}
+
+#[cfg(not(unix))]
+fn local_hm_weekday() -> (i32, i32, i32) {
+    (12, 0, 1)
 }

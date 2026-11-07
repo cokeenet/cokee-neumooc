@@ -19,6 +19,7 @@ pub mod perm;
 pub mod rows;
 pub mod scheduler;
 pub mod sse;
+pub mod timetable;
 pub mod store;
 pub mod tasks;
 pub mod worker;
