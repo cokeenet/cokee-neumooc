@@ -251,11 +251,21 @@ fn spawn_background(state: Arc<api::AppState>) {
                         let _ = watcher.tick(&conn);
                     }
 
-                    // **加随机抖动**（±20%）：固定节拍（每分钟 :00 整）本身
-                    // 就是机器特征 —— 人不会这么准。抖动后请求时刻分散开。
+                    // **按历史时段降频**：
+                    //
+                    // 实测 378 条历史考勤集中在上课时间段（7-12 / 13-17 点），
+                    // 其余时段几乎为 0。全程匀速轮询等于大部分时间在空转 ——
+                    // 平台看到的只是「一台机器无差别刷接口」，这才是被封的原因。
+                    //
+                    // 见 `poll_policy` 模块的注释（含那份真实分布）。
                     let base = neumooc_server::scheduler::attendance_tick_secs();
-                    let jitter = (base as f64 * 0.2 * (rand_jitter() - 0.5)) as i64;
-                    let wait = (base as i64 + jitter).max(30) as u64;
+                    let factor = neumooc_server::poll_policy::slow_factor(std::time::SystemTime::now());
+                    let scaled = (base * factor) as f64;
+
+                    // **加随机抖动**（±20%）：固定节拍本身就是机器特征 ——
+                    // 人不会每次都在 :00 整准时查。
+                    let jitter = scaled * 0.2 * (rand_jitter() - 0.5);
+                    let wait = ((scaled + jitter) as i64).max(30) as u64;
                     std::thread::sleep(std::time::Duration::from_secs(wait));
                 }
             })

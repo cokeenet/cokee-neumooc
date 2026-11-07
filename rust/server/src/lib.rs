@@ -14,6 +14,7 @@ pub mod endpoints;
 pub mod llm;
 pub mod login_guard;
 pub mod notify;
+pub mod poll_policy;
 pub mod perm;
 pub mod rows;
 pub mod scheduler;

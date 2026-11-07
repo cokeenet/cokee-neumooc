@@ -54,4 +54,4 @@ tools/
 protocol/
 
 # 早期 Python 后端（保留作协议参考，不公开）
-server/
+/server/
