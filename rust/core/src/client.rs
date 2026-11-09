@@ -69,13 +69,42 @@ impl Client {
     }
 
     pub fn new(base: impl Into<String>, tenant_id: impl Into<String>) -> Result<Self> {
-        let http = reqwest::blocking::Client::builder()
+        let mut builder = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .user_agent(
                 "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36",
-            )
-            .build()?;
+            );
+
+        // **可选出口代理**。
+        //
+        // ## 为什么需要
+        //
+        // 校园网出口 IP 会被学校 WAF 封（实测整段不通），
+        // 而从 VPS 访问同一平台完全正常。让请求经 VPS 转发后，
+        // 学校看到的源 IP 就与校园网脱钩。
+        //
+        // ## 为什么只给这个 client 加
+        //
+        // `core::Client` **只用于学校平台**。LLM 调用在别处自己建 client，
+        // 不受影响 —— 否则开代理后连国内 LLM 都要绕一圈。
+        //
+        // ## 配置
+        //
+        // `NEUMOOC_PROXY`，形如 `socks5://HOST:PORT` 或 `http://HOST:PORT`
+        // （实际地址由部署方填，不进仓库）。
+        // 空值 = 直连（默认）。**注意**：走代理时不要开
+        // `danger_accept_invalid_certs` —— 那会让中间人攻击变得可能。
+        if let Ok(proxy) = std::env::var("NEUMOOC_PROXY") {
+            let proxy = proxy.trim();
+            if !proxy.is_empty() {
+                let p = reqwest::Proxy::all(proxy)
+                    .map_err(|e| Error::Invalid(format!("代理配置无效（{proxy}）：{e}")))?;
+                builder = builder.proxy(p);
+                log_once_proxy(proxy);
+            }
+        }
+        let http = builder.build()?;
         Ok(Self {
             http,
             base: base.into().trim_end_matches('/').to_string(),
@@ -410,5 +439,18 @@ impl Client {
                     .map(|s| s.trim().to_string())
             })
             .unwrap_or_default()
+    }
+}
+
+/// 只在第一次用到代理时打一行日志。
+///
+/// 每个账号都会新建 client，不管一下会刷屏。
+fn log_once_proxy(proxy: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    if !ONCE.swap(true, Ordering::Relaxed) {
+        // 只打协议与主机，不打印可能的认证信息
+        let shown = proxy.split('@').last().unwrap_or(proxy);
+        eprintln!("[neumooc-core] 平台请求走代理：{shown}");
     }
 }
