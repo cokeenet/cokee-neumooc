@@ -477,7 +477,7 @@ async fn get_auto_sign(
         "hint": if !master {
             "平台已全局关闭自动签到（NEUMOOC_AUTO_SIGN=0）—— 单账号开关无效".to_string()
         } else if on {
-            "每分钟自动同步一次考勤并立即签到；定位场次用平台要求的坐标，不需要人到现场。".to_string()
+            "按课表在课堂时段内每 180 秒同步一次考勤并立即签到（无课时段不查）；定位场次用平台要求的坐标，不需要人到现场。".to_string()
         } else {
             "已关闭：只发提醒，不会自动签到。".to_string()
         },

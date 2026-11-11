@@ -282,15 +282,21 @@ fn spawn_background(state: Arc<api::AppState>) {
                                     // 窗口内：按基准间隔（180 秒），加抖动
                                     let j = base as f64 * 0.2 * (rand_jitter() - 0.5);
                                     ((base as f64 + j) as u64).max(60)
-                                } else if let Some(gap) = t.minutes_to_window(wd, now_min) {
-                                    // 还没到下一节课：睡到窗口前再起，最长 30 分钟一段
+                                } else if let Some(gap_min) = t.minutes_to_window(wd, now_min) {
+                                    // 还没到下一节课：睡到窗口前再起，最长 30 分钟一段。
                                     //
-                                    // 分段而不是一觉睡到点：万一课表过期了
-                                    //（比如临时加的课），30 分钟内能自愈。
-                                    let target = (gap as u64).saturating_sub(
+                                    // 分段而不是一觉睡到点：万一课表过期（临时加课），
+                                    // 30 分钟内能自愈。
+                                    //
+                                    // ⚠️ `minutes_to_window` 返回的是**分钟**，
+                                    // 而 `sleep` 要**秒** —— 早先直接把分钟传给
+                                    // `from_secs`，结果"睡 266 分钟"变成"睡 266 秒"，
+                                    // 窗口外每 4 分钟醒一次。不影响签到正确性，
+                                    // 但白烧 CPU、白读磁盘。
+                                    let target_min = (gap_min as u64).saturating_sub(
                                         neumooc_server::timetable::MARGIN_MIN as u64,
                                     );
-                                    target.clamp(60, 30 * 60)
+                                    target_min.clamp(1, 30) * 60
                                 } else {
                                     // 今天没课了 → 30 分钟后再看（跨天/临时课兜底）
                                     30 * 60
