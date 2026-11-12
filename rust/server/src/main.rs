@@ -129,10 +129,15 @@ fn spawn_background(state: Arc<api::AppState>) {
                 // 那会在没有可签场次时也每分钟插一条执行记录
                 // （3 个账号 = 4320 行/天，运行日志会被刷满）。
                 let auto_inflight: Arc<Mutex<HashSet<i64>>> = Default::default();
+                // 每轮打一行：没有可见日志时，「线程还在不在」完全无从判断
+                // （今天排查 auto 不跑就是这个坑：日志里一片空白，
+                //  分不清是"没派发"还是"派发了但没记录"）
+                let mut round: u64 = 0;
                 // 硬错误（登录失效/网络）的**限频**记录：每账号 15 分钟最多一条
                 let auto_last_err: Arc<Mutex<HashMap<i64, i64>>> = Default::default();
                 loop {
-                    // ── ① 开着自动签到的账号：**每分钟**同步 + 立即签 ──
+                    round += 1;
+                    // ── ① 开着自动签到的账号：同步 + 立即签 ──
                     //
                     // 为什么不复用缓存：`attendance` 表只有手动「同步考勤」才会更新，
                     // 实测 9 个账号里 7 个的缓存是 140 小时前的 —— 新考勤根本不在库里，
@@ -145,6 +150,11 @@ fn spawn_background(state: Arc<api::AppState>) {
                         neumooc_server::scheduler::AttendanceWatcher::auto_sign_accounts(&conn)
                             .unwrap_or_default()
                     };
+                    let (h, m, wd) = local_hm_weekday();
+                    log::info!(
+                        "考勤轮次 #{round} {h:02}:{m:02} 周{wd}：待派发 {} 个账号",
+                        auto_ids.len()
+                    );
                     for aid in auto_ids {
                         // 内存闸门：上一轮还没跑完就跳过（不会堵住别的账号）
                         {
@@ -294,7 +304,7 @@ fn spawn_background(state: Arc<api::AppState>) {
                                     // 窗口外每 4 分钟醒一次。不影响签到正确性，
                                     // 但白烧 CPU、白读磁盘。
                                     let target_min = (gap_min as u64).saturating_sub(
-                                        neumooc_server::timetable::MARGIN_MIN as u64,
+                                        neumooc_server::timetable::PRE_MARGIN_MIN as u64,
                                     );
                                     target_min.clamp(1, 30) * 60
                                 } else {

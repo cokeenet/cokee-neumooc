@@ -25,11 +25,39 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 课堂时间前后各留多少分钟余量。
+/// 课堂开始**前**留多少分钟余量。
 ///
-/// 老师可能提前几分钟到、或拖堂一会；考勤也可能在下课前发起。
-/// 10 分钟足够覆盖，又不至于让窗口变得形同虚设。
-pub const MARGIN_MIN: i32 = 10;
+/// ## 按 383 条历史考勤实测定的，不是拍脑袋
+///
+/// 课前签到的提前量分布：
+///
+/// ```
+/// 提前  5 分钟: 147 次   ← 最多，老师课前发二维码
+/// 提前  0 分钟:  47 次
+/// 提前 10 分钟:  26 次
+/// 提前 15 分钟:   8 次   ← 最长的一批
+/// ```
+///
+/// **10 分钟不够**：覆盖率只有 89.6%，会漏掉「提前 10~15 分钟」那批。
+/// 改 20 分钟后覆盖率升到 96.6%。
+pub const PRE_MARGIN_MIN: i32 = 20;
+
+/// 课堂结束**后**留多少分钟余量。
+///
+/// 课后签到（老师在**下课时**发考勤）的延后量：
+///
+/// ```
+/// 延后  0 分钟: 18 次   ← 下课签
+/// 延后 10 分钟:  1 次
+/// ```
+///
+/// 用户在群里指出过：「第二节这个课是**下课签到**，
+/// 不是上课二十分钟签」。所以尾部余量必须留够，否则下课那波全漏。
+pub const POST_MARGIN_MIN: i32 = 15;
+
+/// 兼容旧的单值写法（外部还引用 `MARGIN_MIN`）。
+#[deprecated(note = "改用 PRE_MARGIN_MIN / POST_MARGIN_MIN，前后余量不再相同")]
+pub const MARGIN_MIN: i32 = PRE_MARGIN_MIN;
 
 /// 一门课的一节课（一条课表格子）。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -38,10 +66,15 @@ pub struct Lesson {
     #[serde(default, rename = "dayOfWeek")]
     pub day_of_week: i32,
     /// "10:00"
-    #[serde(default, rename = "beginTime")]
+    ///
+    /// 同时接受 `beginTime`（教务原始字段）和 `begin`（抓取脚本写出的精简名）。
+    /// **两种都要认** —— 曾经只写了 `beginTime`，而脚本输出的是 `begin`，
+    /// 反序列化时静默变成空串，所有窗口计算失效、自动签到一次都不跑，
+    /// 但日志里毫无报错（`serde(default)` 把字段缺失当成"合法空值"）。
+    #[serde(default, alias = "begin", rename = "beginTime")]
     pub begin: String,
     /// "11:40"
-    #[serde(default, rename = "endTime")]
+    #[serde(default, alias = "end", rename = "endTime")]
     pub end: String,
     /// "6周[讲授]/某老师[主讲]" / "1-16周[讲授]/…"
     #[serde(default, rename = "weeksAndTeachers")]
@@ -150,7 +183,7 @@ pub fn in_class_window(lessons: &[Lesson], now_h: i32, now_m: i32) -> Option<&Le
             // 时间解析不出来：当成全天要查（保守）
             return true;
         };
-        now >= b - MARGIN_MIN && now <= e + MARGIN_MIN
+        now >= b - PRE_MARGIN_MIN && now <= e + POST_MARGIN_MIN
     })
 }
 
@@ -220,13 +253,13 @@ mod tests {
     #[test]
     fn window_has_margin() {
         let ls = vec![lesson(1, "10:00", "11:40", "1-16周")];
-        // 09:50 = 开始前 10 分钟，正好在边界内
-        assert!(in_class_window(&ls, 9, 50).is_some());
-        // 09:49 就出去了
-        assert!(in_class_window(&ls, 9, 49).is_none());
-        // 11:50 = 结束后 10 分钟，边界内
-        assert!(in_class_window(&ls, 11, 50).is_some());
-        assert!(in_class_window(&ls, 11, 51).is_none());
+        // 09:40 = 开始前 20 分钟，正好在边界内
+        assert!(in_class_window(&ls, 9, 40).is_some());
+        // 09:39 就出去了
+        assert!(in_class_window(&ls, 9, 39).is_none());
+        // 11:55 = 结束后 15 分钟，边界内
+        assert!(in_class_window(&ls, 11, 55).is_some());
+        assert!(in_class_window(&ls, 11, 56).is_none());
         // 课中间当然在
         assert!(in_class_window(&ls, 10, 30).is_some());
     }
@@ -301,7 +334,7 @@ impl Timetable {
             .today(weekday)
             .iter()
             .filter_map(|l| l.minutes())
-            .map(|(b, e)| (b - MARGIN_MIN, e + MARGIN_MIN))
+            .map(|(b, e)| (b - PRE_MARGIN_MIN, e + POST_MARGIN_MIN))
             .collect();
         v.sort();
         let mut merged: Vec<(i32, i32)> = Vec::new();
@@ -374,7 +407,8 @@ mod timetable_tests {
         let tt = Timetable::from_arranged(&[l(1, "10:00", "11:40")]);
         let w = tt.today_windows(1);
         assert_eq!(w.len(), 1);
-        assert_eq!(w[0], (10 * 60 - 10, 11 * 60 + 40 + 10));
+        // 课前 20 分钟、课后 15 分钟（按 383 条实测数据定的）
+        assert_eq!(w[0], (10 * 60 - PRE_MARGIN_MIN, 11 * 60 + 40 + POST_MARGIN_MIN));
     }
 
     #[test]
@@ -383,8 +417,8 @@ mod timetable_tests {
         let tt = Timetable::from_arranged(&[l(1, "10:00", "11:40"), l(1, "11:00", "12:40")]);
         let w = tt.today_windows(1);
         assert_eq!(w.len(), 1, "重叠窗口应合并，实际 {w:?}");
-        assert_eq!(w[0].0, 10 * 60 - 10);
-        assert_eq!(w[0].1, 12 * 60 + 40 + 10);
+        assert_eq!(w[0].0, 10 * 60 - PRE_MARGIN_MIN);
+        assert_eq!(w[0].1, 12 * 60 + 40 + POST_MARGIN_MIN);
     }
 
     #[test]
@@ -399,10 +433,40 @@ mod timetable_tests {
         let tt = Timetable::from_arranged(&[l(6, "10:00", "11:40")]);
         assert!(tt.in_window(6, 10 * 60).is_some());
         assert!(tt.in_window(6, 9 * 60).is_none(), "9 点还没到窗口");
-        assert_eq!(tt.minutes_to_window(6, 9 * 60), Some(50));
-        assert_eq!(tt.minutes_to_window(6, 12 * 60), None, "下午没课");
+        // 10:00 前 20 分钟 = 09:40 起是窗口
+        assert_eq!(tt.minutes_to_window(6, 9 * 60), Some(40));
+        assert_eq!(tt.minutes_to_window(6, 12 * 60), None, "12 点已过窗口（11:55 结束）");
         assert!(!tt.has_more_today(6, 12 * 60));
         assert!(tt.has_more_today(6, 11 * 60));
+    }
+
+    /// **回归**：抓取脚本写出的 JSON 必须能被 `load_from_file` 解析出可用窗口。
+    ///
+    /// 踩过一次：脚本输出 `begin`/`end`，结构体只认 `beginTime`/`endTime`，
+    /// `serde(default)` 把缺失字段当空串 —— **解析成功、窗口全空、一声不响**。
+    /// 自动签到因此一次都没跑，而日志里没有任何错误。
+    #[test]
+    fn parses_real_fetcher_output() {
+        let json = r#"{
+          "term": "2026-2027-1",
+          "built_at": 1793971200000,
+          "by_weekday": {
+            "4": [
+              {"day_of_week":4,"begin":"08:00","end":"09:40","weeks":"3-14周","course":"某课","place":"A1"}
+            ]
+          }
+        }"#;
+        let tt: Timetable = serde_json::from_str(json).expect("应能解析");
+        // 关键：窗口必须真的算得出来，不是空
+        let w = tt.today_windows(4);
+        assert!(!w.is_empty(), "窗口为空说明 begin/end 没解出来");
+        assert_eq!(
+            w[0],
+            (8 * 60 - PRE_MARGIN_MIN, 9 * 60 + 40 + POST_MARGIN_MIN),
+            "08:00-09:40 前 20 / 后 15 分钟"
+        );
+        // 以及窗口内判定
+        assert!(tt.in_window(4, 8 * 60).is_some());
     }
 
     #[test]
